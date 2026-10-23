@@ -1,0 +1,60 @@
+---
+# MockServer 8.0.0 with native LLM response mocking (httpLlmResponse).
+# Serves Anthropic (/v1/messages) and Gemini (/v1beta/models/...) shapes.
+# The `mockserver-expectations` ConfigMap is created by
+# scripts/03-deploy-upstream.sh from config/upstream/mockserver-expectations.json.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-llm
+  namespace: llm
+  labels:
+    app: mock-llm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mock-llm
+  template:
+    metadata:
+      labels:
+        app: mock-llm
+    spec:
+      containers:
+        - name: mockserver
+          image: mockserver/mockserver:8.0.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MOCKSERVER_INITIALIZATION_JSON_PATH
+              value: /config/expectations.json
+          ports:
+            - name: http
+              containerPort: 1080
+          readinessProbe:
+            tcpSocket:
+              port: 1080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          volumeMounts:
+            - name: expectations
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: expectations
+          configMap:
+            name: mockserver-expectations
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-llm
+  namespace: llm
+  labels:
+    app: mock-llm
+spec:
+  selector:
+    app: mock-llm
+  ports:
+    - name: http
+      port: 1080
+      targetPort: 1080

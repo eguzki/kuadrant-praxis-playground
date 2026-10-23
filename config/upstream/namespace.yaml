@@ -1,0 +1,8 @@
+---
+# Shared upstream namespace. Intentionally NOT Istio-injected: the Praxis
+# gateway (outside the mesh) connects directly to these Services, and an
+# injected sidecar could interfere with that plaintext path.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm

@@ -1,0 +1,72 @@
+[
+  {
+    "httpRequest": { "method": "GET", "path": "/v1/models" },
+    "httpResponse": {
+      "statusCode": 200,
+      "headers": { "Content-Type": ["application/json"] },
+      "body": { "type": "JSON", "json": { "data": [{ "id": "mock", "type": "model", "display_name": "mock" }] } }
+    }
+  },
+  {
+    "httpRequest": { "method": "GET", "path": "/v1beta/models" },
+    "httpResponse": {
+      "statusCode": 200,
+      "headers": { "Content-Type": ["application/json"] },
+      "body": { "type": "JSON", "json": { "models": [{ "name": "models/mock" }] } }
+    }
+  },
+  {
+    "httpRequest": {
+      "method": "POST",
+      "path": "/v1/messages",
+      "body": { "type": "JSON", "json": { "stream": true }, "matchType": "ONLY_MATCHING_FIELDS" }
+    },
+    "priority": 10,
+    "httpLlmResponse": {
+      "provider": "ANTHROPIC",
+      "model": "mock",
+      "completion": {
+        "text": "hi",
+        "stopReason": "end_turn",
+        "usage": { "inputTokens": 10, "outputTokens": 8 },
+        "streaming": true,
+        "streamingPhysics": {
+          "timeToFirstToken": { "timeUnit": "MILLISECONDS", "value": 50 },
+          "tokensPerSecond": 20
+        }
+      }
+    }
+  },
+  {
+    "httpRequest": { "method": "POST", "path": "/v1/messages" },
+    "httpLlmResponse": {
+      "provider": "ANTHROPIC",
+      "model": "mock",
+      "completion": { "text": "hi", "stopReason": "end_turn", "usage": { "inputTokens": 10, "outputTokens": 8 } }
+    }
+  },
+  {
+    "httpRequest": { "method": "POST", "path": "/v1beta/models/mock:streamGenerateContent" },
+    "httpLlmResponse": {
+      "provider": "GEMINI",
+      "model": "mock",
+      "completion": {
+        "text": "hi",
+        "usage": { "inputTokens": 10, "outputTokens": 8 },
+        "streaming": true,
+        "streamingPhysics": {
+          "timeToFirstToken": { "timeUnit": "MILLISECONDS", "value": 50 },
+          "tokensPerSecond": 20
+        }
+      }
+    }
+  },
+  {
+    "httpRequest": { "method": "POST", "path": "/v1beta/models/mock:generateContent" },
+    "httpLlmResponse": {
+      "provider": "GEMINI",
+      "model": "mock",
+      "completion": { "text": "hi", "usage": { "inputTokens": 10, "outputTokens": 8 } }
+    }
+  }
+]

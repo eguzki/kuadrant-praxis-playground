@@ -1,0 +1,7 @@
+# transient
+*.log
+/tmp/
+.DS_Store
+
+# scratch: cloned Praxis AI source for the image build
+/.cache/

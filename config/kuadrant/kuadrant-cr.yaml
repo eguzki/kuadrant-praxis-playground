@@ -1,0 +1,9 @@
+---
+# Bootstraps the Kuadrant data plane (Limitador + Authorino) once the operator
+# is installed. Namespace is created by the helm install.
+apiVersion: kuadrant.io/v1beta1
+kind: Kuadrant
+metadata:
+  name: kuadrant
+  namespace: kuadrant-system
+spec: {}
