@@ -108,9 +108,13 @@ the response. Playground values (small on purpose, easy to trip):
 window: 1m   capacity: 200   reserved_tokens: 50   key: global   algorithm: sliding_window
 ```
 
-~4 requests/min are admitted before HTTP 429. 429 responses carry `X-RateLimit-*-Tokens`
-headers. To change the limit, edit the ConfigMap and re-run `make praxis` (it restarts the
-deployment).
+The inference-sim reports ~20 tokens/response, so **~8 requests/min** are admitted before
+HTTP 429: each reserves 50 at admission, then reconciles down to the real ~20, so a 9th
+request can't get its 50-token headroom. 429 responses carry `X-RateLimit-*-Tokens` headers
+(`Limit=200`, `Remaining=0`, `Reset` counting down the window). To change the limit, edit
+the ConfigMap and re-run `make praxis` (it restarts the deployment).
+
+Verified working: 8×`200` (each with real `usage.total_tokens`) then `429`.
 
 ## Key facts / gotchas (learned while building)
 
@@ -125,6 +129,18 @@ deployment).
   v1.4.1) — a potential conflict to resolve.
 - Praxis container: `ENTRYPOINT ["praxis-ai"]`, config via `-c`, data port `8080`,
   admin/observability `9901`. Probes use TCP `8080`.
+- **Praxis refuses to dial private/reserved IPs by default.** Cluster Service IPs are
+  private, so the `load_balancer` upstream needs `insecure_options.allow_private_upstreams:
+  true` or every proxied request fails with **502** (`ConnectError ... resolved to
+  private/reserved IP`). Note the `token_rate_limit` reservation still fires on a 502 (and
+  is NOT reconciled, since no usage is reported), which looked like "rate limiting works but
+  returns 502" until the upstream was fixed. `allow_private_endpoints` (from the upstream
+  examples) is a different key and does NOT cover the upstream dial.
+- **Istio gateway `Programmed=False` in kind is normal** — no LoadBalancer means the Service
+  external address stays pending (`AddressNotAssigned`). The data plane still works; wait on
+  the `ingress-gateway-istio` Deployment, not the gateway's `Programmed` condition.
+- **`kubectl wait` can't read HTTPRoute conditions** (they live under `status.parents[]`);
+  poll `.status.parents[0].conditions[?(@.type=="Accepted")].status` instead.
 - **MockServer 8.0.0 natively supports `httpLlmResponse`** (LLM response mocking with
   `provider`/`usage`/`streamingPhysics`). The expectations here are adapted from
   Kuadrant/wasm-shim#437 `utils/multi_llm_provider/` with the `Host`-header matchers

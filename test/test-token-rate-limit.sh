@@ -4,9 +4,10 @@
 # Prereq: port-forward the Praxis gateway in another terminal:
 #   ./test/port-forward.sh praxis
 #
-# With the playground config (window=1m, capacity=200, reserved_tokens=50),
-# ~4 requests are admitted per minute before the sliding-window budget is
-# exhausted and the gateway starts returning HTTP 429.
+# With the playground config (window=1m, capacity=200, reserved_tokens=50) and
+# the inference-sim reporting ~20 tokens/response, ~8 requests are admitted per
+# minute: each reserves 50 at admission, then reconciles down to the real ~20,
+# so a 9th request can't get its 50-token headroom and gets HTTP 429.
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:8080}"

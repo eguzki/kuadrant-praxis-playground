@@ -39,7 +39,9 @@ data:
           # Reserve an estimated token cost at admission, reconcile against the
           # provider-reported usage once the response completes. 429 when the
           # sliding-window budget can't cover the estimate.
-          # Small capacity on purpose so the limit is easy to trip in a demo.
+          # Small capacity on purpose so the limit is easy to trip in a demo:
+          # inference-sim reports ~20 tokens/response, so ~8 requests/min are
+          # admitted (each reserves 50, reconciles to ~20) before HTTP 429.
           - filter: token_rate_limit
             key: global
             default_weights:
@@ -70,6 +72,9 @@ data:
                 endpoints:
                   - "mock-llm.llm.svc.cluster.local:1080"
 
-    # Cluster Service IPs are private; allow proxying to them.
+    # Cluster Service IPs are private; allow proxying/dialing to them.
+    # allow_private_upstreams is the one the load_balancer upstream dial checks
+    # (Pingora refuses private/reserved IPs otherwise -> 502).
     insecure_options:
+      allow_private_upstreams: true
       allow_private_endpoints: true
