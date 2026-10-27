@@ -35,9 +35,43 @@ PRAXIS_AI_REF="${PRAXIS_AI_REF:-main}"
 PRAXIS_AI_SRC="${PRAXIS_AI_SRC:-${CACHE_DIR}/praxis-ai}"
 PRAXIS_AI_IMAGE="${PRAXIS_AI_IMAGE:-praxis-ai:dev}"
 # token-rate-limit-filter is an EXPERIMENTAL feature, excluded from default/prebuilt builds.
+# The base image (praxis-ai:dev) serves offerings P1 (rate_limit) and P2 (token_rate_limit).
 PRAXIS_AI_FEATURES="${PRAXIS_AI_FEATURES:-full,token-rate-limit-filter}"
 
+# Offering-specific image variants (built from source by scripts/05; see the
+# per-offering build overlays). These PPE-plugin builds are BEST-EFFORT spikes:
+# the experimental features are not forwarded by praxis-core/ai, so the build
+# patches praxis-core + praxis-policy in via [patch.crates-io].
+#   P3: praxis-ai:quota      -> PPE quota/limitador plugin (feature experimental-quota)
+#   P4: praxis-ai:ratelimit  -> PPE ratelimit/limitador plugin (feature experimental-ratelimit)
+PRAXIS_AI_IMAGE_QUOTA="${PRAXIS_AI_IMAGE_QUOTA:-praxis-ai:quota}"
+PRAXIS_AI_IMAGE_RATELIMIT="${PRAXIS_AI_IMAGE_RATELIMIT:-praxis-ai:ratelimit}"
+
+# Praxis core + policy sources for the P3/P4 from-source builds (see lib.sh notes).
+# P3 (quota/limitador) is merged on praxis-proxy/policy main.
+# P4 (ratelimit/limitador) lives only in draft PR #178 on the fork below.
+PRAXIS_CORE_REPO="${PRAXIS_CORE_REPO:-https://github.com/praxis-proxy/praxis.git}"
+PRAXIS_CORE_REF="${PRAXIS_CORE_REF:-main}"
+PRAXIS_POLICY_REPO="${PRAXIS_POLICY_REPO:-https://github.com/praxis-proxy/policy.git}"
+PRAXIS_POLICY_REF="${PRAXIS_POLICY_REF:-main}"
+PRAXIS_POLICY_P4_REPO="${PRAXIS_POLICY_P4_REPO:-https://github.com/maleck13/policy.git}"
+PRAXIS_POLICY_P4_REF="${PRAXIS_POLICY_P4_REF:-proposal/limitador-plugin}"
+
+# Standalone Limitador (P3 backs onto this over HTTP).
+LIMITADOR_IMAGE="${LIMITADOR_IMAGE:-quay.io/kuadrant/limitador:latest}"
+
 CONTAINER_ENGINE="${CONTAINER_ENGINE:-docker}"
+
+# ---------------------------------------------------------------------------
+# JWT test issuer (static JWKS). Tiered acceptance tests (M1 override, M5 keys)
+# need JWTs carrying a `tier` claim. Keys/JWKS/tokens are generated into
+# ${CACHE_DIR}/jwt and ${CACHE_DIR}/tokens by scripts/lib-jwt.sh (gitignored).
+# ---------------------------------------------------------------------------
+JWT_ISSUER="${JWT_ISSUER:-https://jwt-issuer.praxis.local}"
+JWT_AUDIENCE="${JWT_AUDIENCE:-praxis-playground}"
+JWT_KID="${JWT_KID:-praxis-playground}"
+# In-cluster JWKS URL (served by the jwt-issuer pod in the upstream namespace).
+JWT_JWKS_URL="${JWT_JWKS_URL:-http://jwt-issuer.llm.svc.cluster.local:8080/.well-known/jwks.json}"
 
 # ---------------------------------------------------------------------------
 # Namespaces
