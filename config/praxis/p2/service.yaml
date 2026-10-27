@@ -3,9 +3,10 @@ apiVersion: v1
 kind: Service
 metadata:
   name: praxis-ai
-  namespace: praxis-gateway
+  namespace: praxis-p2
   labels:
     app: praxis-ai
+    offering: p2
 spec:
   selector:
     app: praxis-ai

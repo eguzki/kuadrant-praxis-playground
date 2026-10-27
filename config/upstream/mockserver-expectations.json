@@ -13,8 +13,6 @@
   },
 
   {
-    "//": "M1/M4/M5: OpenAI chat completions, matched on request-body `model`.",
-    "//cached": "gpt-4o carries prompt_tokens_details.cached_tokens so token-type weights (M4) can be exercised.",
     "httpRequest": {
       "method": "POST",
       "path": "/v1/chat/completions",
@@ -39,7 +37,6 @@
     }
   },
   {
-    "//": "M1 (exempt tier) / M5: gpt-4o-mini, small usage.",
     "httpRequest": {
       "method": "POST",
       "path": "/v1/chat/completions",
@@ -59,7 +56,6 @@
     }
   },
   {
-    "//": "M1 default catch-all for chat completions (any other model, e.g. `mock`).",
     "httpRequest": { "method": "POST", "path": "/v1/chat/completions" },
     "priority": 5,
     "httpResponse": {
@@ -76,7 +72,6 @@
   },
 
   {
-    "//": "M1 (exempt): embeddings path. OpenAI embeddings usage has no completion tokens.",
     "httpRequest": { "method": "POST", "path": "/v1/embeddings" },
     "priority": 10,
     "httpResponse": {

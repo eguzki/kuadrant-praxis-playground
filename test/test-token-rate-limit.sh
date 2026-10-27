@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Exercise token rate limiting on the Praxis AI gateway.
 #
-# Prereq: port-forward the Praxis gateway in another terminal:
-#   ./test/port-forward.sh praxis
+# Prereq: port-forward the P2 (token_rate_limit) gateway in another terminal:
+#   ./test/port-forward.sh p2
 #
 # With the playground config (window=1m, capacity=200, reserved_tokens=50) and
 # the inference-sim reporting ~20 tokens/response, ~8 requests are admitted per
@@ -10,7 +10,7 @@
 # so a 9th request can't get its 50-token headroom and gets HTTP 429.
 set -euo pipefail
 
-BASE_URL="${BASE_URL:-http://localhost:8080}"
+BASE_URL="${BASE_URL:-http://localhost:8082}"
 COUNT="${COUNT:-8}"
 BODY='{"model":"mock","messages":[{"role":"user","content":"Tell me a three sentence bedtime story about a unicorn."}]}'
 

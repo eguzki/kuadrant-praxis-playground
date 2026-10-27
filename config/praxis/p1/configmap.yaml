@@ -1,0 +1,65 @@
+---
+# Offering P1 -- Praxis core `rate_limit` filter (request-count, not tokens).
+# Token-bucket limiter keyed only by `global` or `per_ip`. See findings.md for
+# the #200 scoring/notes.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: praxis-ai-config
+  namespace: praxis-p1
+data:
+  praxis-ai.yaml: |
+    # Health + Prometheus metrics (/healthy, /ready, /metrics) on :9901.
+    # Bind 0.0.0.0 so port-forward/scraping works (default is 127.0.0.1).
+    admin:
+      metrics_address: "0.0.0.0:9901"
+
+    listeners:
+      - name: ai
+        address: "0.0.0.0:8080"
+        filter_chains:
+          - main
+
+    filter_chains:
+      - name: main
+        filters:
+          # Request-count admission BEFORE routing. Small burst so 429 trips
+          # fast: ~1 req/s sustained, bursts of 5. Injects X-RateLimit-* on both
+          # 200 and 429 (M6). `shadow: true` would observe-only (S1-ish).
+          - filter: rate_limit
+            mode: per_ip
+            rate: 1
+            burst: 5
+            ipv6_prefix_len: 128
+            shadow: false
+
+          - filter: router
+            routes:
+              - path: "/v1/chat/completions"
+                cluster: openai_backend
+              - path: "/v1/embeddings"
+                cluster: openai_backend
+              - path_prefix: "/v1/models"
+                cluster: openai_backend
+              - path: "/v1/messages"
+                cluster: anthropic_backend
+              - path_prefix: "/v1beta/models/"
+                cluster: gemini_backend
+
+          - filter: access_log
+
+          - filter: load_balancer
+            clusters:
+              - name: openai_backend
+                endpoints:
+                  - "mock-llm.llm.svc.cluster.local:1080"
+              - name: anthropic_backend
+                endpoints:
+                  - "mock-llm.llm.svc.cluster.local:1080"
+              - name: gemini_backend
+                endpoints:
+                  - "mock-llm.llm.svc.cluster.local:1080"
+
+    insecure_options:
+      allow_private_upstreams: true
+      allow_private_endpoints: true

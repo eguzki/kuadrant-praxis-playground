@@ -80,8 +80,15 @@ KUADRANT_NAMESPACE="${KUADRANT_NAMESPACE:-kuadrant-system}"
 ISTIO_NAMESPACE="${ISTIO_NAMESPACE:-istio-system}"
 CERT_MANAGER_NAMESPACE="${CERT_MANAGER_NAMESPACE:-cert-manager}"
 GATEWAY_NAMESPACE="${GATEWAY_NAMESPACE:-ingress-gateway}"
-PRAXIS_NAMESPACE="${PRAXIS_NAMESPACE:-praxis-gateway}"
 UPSTREAM_NAMESPACE="${UPSTREAM_NAMESPACE:-llm}"
+
+# One namespace per Praxis offering gateway (user decision). Each holds a
+# Deployment+Service named `praxis-ai`. Port-forward map (one local port each,
+# see test/port-forward.sh): p1->8081 p2->8082 p3->8083 p4->8084 (istio->8080).
+PRAXIS_P1_NAMESPACE="${PRAXIS_P1_NAMESPACE:-praxis-p1}"
+PRAXIS_P2_NAMESPACE="${PRAXIS_P2_NAMESPACE:-praxis-p2}"
+PRAXIS_P3_NAMESPACE="${PRAXIS_P3_NAMESPACE:-praxis-p3}"
+PRAXIS_P4_NAMESPACE="${PRAXIS_P4_NAMESPACE:-praxis-p4}"
 
 # ---------------------------------------------------------------------------
 # Helpers

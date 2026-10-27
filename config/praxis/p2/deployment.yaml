@@ -2,15 +2,16 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: praxis-gateway
+  name: praxis-p2
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: praxis-ai
-  namespace: praxis-gateway
+  namespace: praxis-p2
   labels:
     app: praxis-ai
+    offering: p2
 spec:
   replicas: 1
   selector:
@@ -20,14 +21,14 @@ spec:
     metadata:
       labels:
         app: praxis-ai
+        offering: p2
       annotations:
         # Bump this to force a rollout when the ConfigMap changes.
         config/checksum: "v1"
     spec:
       containers:
         - name: praxis-ai
-          # Built from local source (praxis-proxy/ai) with the experimental
-          # token-rate-limit-filter enabled, then loaded into kind.
+          # Base image (token-rate-limit-filter enabled); serves P1 and P2.
           image: praxis-ai:dev
           imagePullPolicy: IfNotPresent
           args:
