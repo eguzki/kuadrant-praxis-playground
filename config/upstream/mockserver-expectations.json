@@ -4,9 +4,93 @@
     "httpResponse": {
       "statusCode": 200,
       "headers": { "Content-Type": ["application/json"] },
-      "body": { "type": "JSON", "json": { "data": [{ "id": "mock", "type": "model", "display_name": "mock" }] } }
+      "body": { "type": "JSON", "json": { "object": "list", "data": [
+        { "id": "gpt-4o", "object": "model" },
+        { "id": "gpt-4o-mini", "object": "model" },
+        { "id": "mock", "object": "model" }
+      ] } }
     }
   },
+
+  {
+    "//": "M1/M4/M5: OpenAI chat completions, matched on request-body `model`.",
+    "//cached": "gpt-4o carries prompt_tokens_details.cached_tokens so token-type weights (M4) can be exercised.",
+    "httpRequest": {
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": { "type": "JSON", "json": { "model": "gpt-4o" }, "matchType": "ONLY_MATCHING_FIELDS" }
+    },
+    "priority": 20,
+    "httpResponse": {
+      "statusCode": 200,
+      "headers": { "Content-Type": ["application/json"] },
+      "body": { "type": "JSON", "json": {
+        "id": "chatcmpl-gpt4o",
+        "object": "chat.completion",
+        "model": "gpt-4o",
+        "choices": [ { "index": 0, "message": { "role": "assistant", "content": "hi" }, "finish_reason": "stop" } ],
+        "usage": {
+          "prompt_tokens": 3000,
+          "completion_tokens": 500,
+          "total_tokens": 3500,
+          "prompt_tokens_details": { "cached_tokens": 2000 }
+        }
+      } }
+    }
+  },
+  {
+    "//": "M1 (exempt tier) / M5: gpt-4o-mini, small usage.",
+    "httpRequest": {
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": { "type": "JSON", "json": { "model": "gpt-4o-mini" }, "matchType": "ONLY_MATCHING_FIELDS" }
+    },
+    "priority": 20,
+    "httpResponse": {
+      "statusCode": 200,
+      "headers": { "Content-Type": ["application/json"] },
+      "body": { "type": "JSON", "json": {
+        "id": "chatcmpl-gpt4omini",
+        "object": "chat.completion",
+        "model": "gpt-4o-mini",
+        "choices": [ { "index": 0, "message": { "role": "assistant", "content": "hi" }, "finish_reason": "stop" } ],
+        "usage": { "prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70 }
+      } }
+    }
+  },
+  {
+    "//": "M1 default catch-all for chat completions (any other model, e.g. `mock`).",
+    "httpRequest": { "method": "POST", "path": "/v1/chat/completions" },
+    "priority": 5,
+    "httpResponse": {
+      "statusCode": 200,
+      "headers": { "Content-Type": ["application/json"] },
+      "body": { "type": "JSON", "json": {
+        "id": "chatcmpl-default",
+        "object": "chat.completion",
+        "model": "mock",
+        "choices": [ { "index": 0, "message": { "role": "assistant", "content": "hi" }, "finish_reason": "stop" } ],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20 }
+      } }
+    }
+  },
+
+  {
+    "//": "M1 (exempt): embeddings path. OpenAI embeddings usage has no completion tokens.",
+    "httpRequest": { "method": "POST", "path": "/v1/embeddings" },
+    "priority": 10,
+    "httpResponse": {
+      "statusCode": 200,
+      "headers": { "Content-Type": ["application/json"] },
+      "body": { "type": "JSON", "json": {
+        "object": "list",
+        "model": "text-embedding-3-small",
+        "data": [ { "object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3] } ],
+        "usage": { "prompt_tokens": 100, "total_tokens": 100 }
+      } }
+    }
+  },
+
   {
     "httpRequest": { "method": "GET", "path": "/v1beta/models" },
     "httpResponse": {
