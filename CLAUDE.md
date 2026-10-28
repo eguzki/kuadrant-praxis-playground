@@ -1,26 +1,50 @@
 # kuadrant-praxis-playground
 
-A local **kind**-based environment to compare / test **token rate limiting** on two
-AI gateways sharing one upstream:
+A local **kind** environment to **live-validate the Kuadrant/Praxis token-rate-limiting
+feature-gap findings** from [praxis-proxy/policy#200](https://github.com/praxis-proxy/policy/issues/200)
+against proposal `00121`'s **M1–M7** acceptance tests. It stands up **one AI gateway per
+rate-limiting offering** over a shared upstream, so each predicted score can be confirmed or
+corrected on a real deployment.
 
-1. **Kuadrant control plane + Istio**, with **one Istio-managed gateway** (pass-through
-   for now — no rate-limit policy attached yet).
-2. **Praxis AI gateway** (`praxis-proxy/ai`) enforcing token rate limiting **natively**
-   via its experimental `token_rate_limit` filter.
-3. A **shared upstream** (`llm-d-inference-sim` + MockServer) fronted by both gateways.
+Everything is installed via **Helm** (Kuadrant, Istio, cert-manager) on a kind cluster,
+mirroring the Kuadrant 1.6.0 install path. A **static-JWKS JWT issuer** mints per-tier
+(`gold`/`silver`/`enterprise`) tokens for the tiered tests.
 
-Everything is installed via **Helm charts** (Kuadrant, Istio, cert-manager) on a kind
-cluster, mirroring the official Kuadrant 1.6.0 install path.
+## Offerings (the six compared)
 
-## Current scope (as built)
+| Col | ns / gateway | What | Layer |
+|---|---|---|---|
+| **P1** | `praxis-p1` | core `rate_limit` filter (request-count) | Praxis data plane (`HttpFilter`) |
+| **P2** | `praxis-p2` | `token_rate_limit` filter (token, native) | Praxis data plane (`HttpFilter`) |
+| **P3** | `praxis-p3` | `quota/limitador` plugin (token, **standalone** Limitador over HTTP) | Praxis PPE plugin |
+| **P4** | `praxis-p4` | `ratelimit/limitador` plugin (request-count, **embedded** Limitador) | Praxis PPE plugin |
+| **K-TRLP** | Istio gw | Kuadrant `TokenRateLimitPolicy` (token) | Kuadrant |
+| **K-RLP** | Istio gw | Kuadrant `RateLimitPolicy` (request-count) | Kuadrant |
 
-- Token rate limiting is enforced **only on the Praxis gateway** (user decision).
-  The Istio gateway is up and routes to the shared upstream but has no
-  `TokenRateLimitPolicy` yet. Kuadrant's `TokenRateLimitPolicy` is the natural next
-  step for parity (see "Next steps").
-- Praxis AI is built **from local source** (not the prebuilt ghcr image) because the
-  `token-rate-limit-filter` is an **experimental** cargo feature excluded from
-  default/release/prebuilt builds.
+Data-plane filters (P1/P2) see the request body directly; PPE plugins (P3/P4) operate on CMF
+messages (body/model reaches them only via `cmf.llm_input`, not the bodyless `http.request`
+hook). See the comparison doc (gist) for the full per-criterion analysis.
+
+## Live-validation status (running log in `findings.md`)
+
+- **P2 — LIVE VERIFIED: M1–M7 (all).** Confirmations: **M3** reserved estimate tracks body
+  `max_tokens` (`estimation.strategy: max_tokens` → 100/2000/absent reserve 100/2000/50),
+  **M4** weighted reconcile (gpt-4o 3000 / cached 2000 / completion 500 → `actual=1700`,
+  cached weight 0.1), **M5** compound `(model, tier)` keys, **M6** 429 +
+  `X-RateLimit-*-Tokens` (**on 429 only**), **M2** reserve→reconcile, **M7** `praxis_trl_*`
+  metrics + accounting logs. Model match via `model_to_header`→`X-Model` works at admission.
+  Caveats: enterprise exemption is **approximated** (huge-capacity rule; `token_rate_limit`
+  has no native "exempt" action); `x-tier` is currently a **client header**, not yet a
+  verified-JWT claim.
+- **P1** — deployed; #200 predicts M1 🟡, M5 ❌, M6 ✅, M7 🟡, S1 🟡; M2/M3/M4 N/A. Live
+  confirmation pending.
+- **P3, P4, K-TRLP, K-RLP** — not yet deployed/exercised (source-build spike for P3/P4).
+
+## How it's built
+
+- Praxis AI is built **from local source** (not the prebuilt ghcr image) because
+  `token-rate-limit-filter` is an **experimental** cargo feature excluded from prebuilt builds.
+  P3/P4 additionally need `experimental-quota` / `experimental-ratelimit` (policy engine).
 
 ## Layout
 
@@ -80,9 +104,12 @@ Individual steps: `make cluster | deps | kuadrant | upstream | istio-gateway | p
 - `kuadrant-system` — Kuadrant operator + Kuadrant CR (Limitador, Authorino)
 - `istio-system` — Istio
 - `cert-manager` — cert-manager
-- `ingress-gateway` — the single Istio-managed gateway (`ingress-gateway`)
-- `praxis-gateway` — the Praxis AI gateway
-- `llm` — shared upstream (`llm-d-inference-sim`, `mock-llm`)
+- `ingress-gateway` — the single Istio-managed gateway (hosts the Kuadrant K-TRLP/K-RLP policies)
+- `praxis-p1` … `praxis-p4` — one namespace per Praxis offering, each a Deployment+Service
+  named `praxis-ai` (+ ConfigMap). Port-forward map: p1→8081, p2→8082, p3→8083, p4→8084,
+  istio→8080 (override `LOCAL_PORT=`).
+- `jwt-issuer` — static-JWKS issuer; per-tier JWTs land in `.cache/tokens/{gold,silver,enterprise,notier}.jwt`
+- `llm` — shared upstream (`llm-d-inference-sim`, `mock-llm` multi-model mockserver)
 
 ## Request routing (both gateways)
 
@@ -118,6 +145,14 @@ Verified working: 8×`200` (each with real `usage.total_tokens`) then `429`.
 
 ## Key facts / gotchas (learned while building)
 
+- **Praxis metrics need an `admin` block bound to `0.0.0.0`.** The Prometheus recorder is
+  only installed when `admin.address`/`admin.metrics_address` is set; `/metrics` (incl. all
+  `praxis_trl_*`) is absent otherwise, and the default `127.0.0.1:9901` is unreachable via
+  `kubectl port-forward` — use `admin.metrics_address: "0.0.0.0:9901"` (P2 configmap does).
+- **MockServer rejects JSON comment keys.** `mockserver:8.0.0` validates the init JSON
+  strictly (`additionalProperties: false`); a `"//": "..."` key anywhere makes it reject the
+  **entire** file → 0 expectations → every request 404/502. Keep
+  `config/upstream/mockserver-expectations.json` comment-free.
 - **`token-rate-limit-filter` is experimental.** Build with
   `PRAXIS_AI_FEATURES=full,token-rate-limit-filter` (set in `lib.sh`). Prebuilt
   `ghcr.io/praxis-proxy/ai` images do NOT include it. `scripts/05` clones the Praxis AI

@@ -116,8 +116,12 @@ data:
               - name: default
                 algorithm: sliding_window
                 window: 1m
-                capacity: 200
-                reserved_tokens: 50
+                capacity: 1000000
+                # M3: reserved cost estimated from the request body's max_tokens
+                # (operator-chosen strategy), not a fixed amount. Fallback when absent.
+                estimation:
+                  strategy: max_tokens
+                  fallback_estimate: 50
 
           # Parse OpenAI usage for reconciliation. Declared AFTER token_rate_limit
           # (response hooks run in reverse), so token.* is written before TRL reads it.

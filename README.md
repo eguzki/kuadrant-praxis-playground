@@ -16,6 +16,19 @@ confirmed or corrected against a real deployment.
 
 ## Offerings
 
+Six rate-limiting offerings are compared, in three groups:
+
+- **P1, P2 — native Praxis data-plane filters** (`HttpFilter`s inline in the proxy
+  pipeline, with direct request/response and body access). **P1** is the request-count
+  core `rate_limit` builtin; **P2** is the token-denominated `token_rate_limit` filter
+  (the primary tokenomics offering).
+- **P3, P4 — Praxis Policy Engine (PPE) plugins** (operate on normalized CMF messages
+  / PPE hooks, not raw HTTP). **P3** (`quota/limitador`) does token quota against a
+  **standalone** Limitador over HTTP; **P4** (`ratelimit/limitador`) does request-count
+  with an **embedded** Limitador (PoC).
+- **K-TRLP, K-RLP — Kuadrant policies** on the Istio gateway. **K-TRLP** is
+  `TokenRateLimitPolicy` (token); **K-RLP** is `RateLimitPolicy` (request-count).
+
 | Col | Gateway | What | Status |
 |---|---|---|---|
 | **P1** | `praxis-p1` | Praxis core `rate_limit` filter (request-count) | ✅ deployed |

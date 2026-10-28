@@ -26,6 +26,12 @@ Config: `config/praxis/p2/configmap.yaml`. Upstream = MockServer (model-varied u
 - **M2 (reserve→reconcile): ✅** reserve `reserved_tokens` at admission, reconcile to actual
   usage (metrics `tokens_reserved_total` → `tokens_reconciled_total`; accounting log
   `phase=admission`/`reconciliation`).
+- **M3 (configurable estimation): ✅** `default` rule set to
+  `estimation: {strategy: max_tokens, fallback_estimate: 50}`; `praxis_trl_tokens_reserved_total{rule="default"}`
+  delta tracked the request body `max_tokens` exactly: **`max_tokens:100` → +100,
+  `max_tokens:2000` → +2000, absent → +50 (fallback)**. Reserved cost is computed from
+  request metadata via an operator-selected strategy (not a fixed amount). Strategies
+  available: `fixed` / `max_tokens` / `input_plus_max_tokens` / `model_scaled`.
 - **M4 (token-type weights): ✅** gpt-4o response (prompt 3000 / cached 2000 / completion 500)
   reconciled to **`actual=1700`** = `(3000−2000)×1 + 2000×0.1 + 500×1`, not raw
   `total_tokens=3500`. `cached_input: 0.1` weight applied.
