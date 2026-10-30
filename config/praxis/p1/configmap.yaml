@@ -1,7 +1,7 @@
 ---
 # Offering P1 -- Praxis core `rate_limit` filter (request-count, not tokens).
-# Token-bucket limiter keyed only by `global` or `per_ip`. See findings.md for
-# the #200 scoring/notes.
+# Token-bucket limiter keyed only by `global` or `per_ip`. See CLAUDE.md
+# "Live-validation findings" for the #200 scoring/notes.
 apiVersion: v1
 kind: ConfigMap
 metadata:

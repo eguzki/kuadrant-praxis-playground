@@ -1,0 +1,140 @@
+---
+# Offering P3 -- Praxis PPE `quota/limitador` plugin (token, standalone Limitador).
+#
+# Chain: router -> policy (PPE) -> load_balancer. The `policy` filter embeds the
+# Praxis Policy Engine; the policy document (policy.yaml below) declares:
+#   - identity/jwt  : verifies the issuer's RS256 JWT (JWKS over plaintext http),
+#                     maps `sub` -> subject.id
+#   - quota/limitador: per-subject token budget against the standalone Limitador
+#                      (check on cmf.llm_input, debit on cmf.llm_output)
+#
+# Requires image praxis-ai:quota (experimental-quota) and the standalone
+# Limitador (config/upstream/limitador-standalone.yaml). `body_access: read_write`
+# is REQUIRED so cmf.llm_output fires (the quota debit). `allow_private_idp: true`
+# lets the JWKS fetch and the quota->Limitador calls reach cluster ClusterIPs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: praxis-ai-config
+  namespace: praxis-p3
+data:
+  praxis-ai.yaml: |
+    admin:
+      metrics_address: "0.0.0.0:9901"
+
+    listeners:
+      - name: ai
+        address: "0.0.0.0:8080"
+        filter_chains:
+          - main
+
+    filter_chains:
+      - name: main
+        filters:
+          - filter: policy
+            config_path: /etc/praxis/policy.yaml
+            # read_write enables cmf.llm_output for non-streaming responses,
+            # which the quota debit runs on.
+            body_access: read_write
+            # Permit policy-engine callouts (JWKS fetch, quota HTTP) to private
+            # cluster addresses.
+            allow_private_idp: true
+            llm:
+              require_model: true
+              # No llm: routes in the policy doc, so don't deny unlisted models.
+              require_route: false
+              provider: openai
+
+          - filter: router
+            routes:
+              - path: "/v1/chat/completions"
+                cluster: openai_backend
+              - path: "/v1/embeddings"
+                cluster: openai_backend
+              - path_prefix: "/v1/models"
+                cluster: openai_backend
+              - path: "/v1/messages"
+                cluster: anthropic_backend
+              - path_prefix: "/v1beta/models/"
+                cluster: gemini_backend
+
+          - filter: access_log
+
+          - filter: load_balancer
+            clusters:
+              - name: openai_backend
+                endpoints:
+                  - "mock-llm.llm.svc.cluster.local:1080"
+              - name: anthropic_backend
+                endpoints:
+                  - "mock-llm.llm.svc.cluster.local:1080"
+              - name: gemini_backend
+                endpoints:
+                  - "mock-llm.llm.svc.cluster.local:1080"
+
+    insecure_options:
+      allow_private_upstreams: true
+      allow_private_endpoints: true
+
+  policy.yaml: |
+    plugins:
+      - name: jwt-user
+        kind: identity/jwt
+        hooks: [identity.resolve]
+        on_error: fail
+        # Needs perform_http to fetch the JWKS from the issuer.
+        capabilities: [perform_http]
+        config:
+          header: Authorization
+          trusted_issuers:
+            - issuer: "https://jwt-issuer.praxis.local"
+              audiences: ["praxis-playground"]
+              algorithms: ["RS256"]
+              decoding_key:
+                kind: jwks_url
+                url: "http://jwt-issuer.llm.svc.cluster.local:8080/.well-known/jwks.json"
+                insecure_http: true
+          claim_mapper: standard
+          # Expose the custom `tier` claim to APL (as claim.tier) for the M1 gate.
+          claims:
+            include: [tier]
+
+      - name: token-quota
+        kind: quota/limitador
+        hooks: [cmf.llm_input, cmf.llm_output]
+        capabilities: [read_subject, read_claims, perform_http]
+        config:
+          endpoint: "http://limitador-standalone.llm.svc.cluster.local:8080"
+          namespace: praxis-p3-tokens
+          # P3 can send ONE descriptor; key the budget on the tier claim so the
+          # Limitador per-tier limits (descriptors[0]["tier"]) apply.
+          identity_claim: tier
+          on_error: deny
+          timeout_seconds: 5
+          missing_usage_charge: 1000
+          insecure_http: true
+          allow_unauthenticated: false
+
+    global:
+      authentication:
+        - jwt-user
+      authorization:
+        pre_invocation:
+          - "require(authenticated)"
+
+    # M1 (applicability) at the APL layer: run the quota plugin for everyone EXCEPT
+    # enterprise -> enterprise is truly exempt (plugin never dispatched, zero cost).
+    # llm route maps pre_invocation -> cmf.llm_input (check), post_invocation ->
+    # cmf.llm_output (debit). Which per-tier budget applies (M5) is decided by the
+    # Limitador limits (descriptors[0]["tier"]).
+    routes:
+      - llm: "*"
+        authorization:
+          pre_invocation:
+            - when: 'claim.tier != "enterprise"'
+              do:
+                - "run(token-quota)"
+          post_invocation:
+            - when: 'claim.tier != "enterprise"'
+              do:
+                - "run(token-quota)"

@@ -25,20 +25,72 @@ Data-plane filters (P1/P2) see the request body directly; PPE plugins (P3/P4) op
 messages (body/model reaches them only via `cmf.llm_input`, not the bodyless `http.request`
 hook). See the comparison doc (gist) for the full per-criterion analysis.
 
-## Live-validation status (running log in `findings.md`)
+## Live-validation findings (issue #200)
 
-- **P2 — LIVE VERIFIED: M1–M7 (all).** Confirmations: **M3** reserved estimate tracks body
-  `max_tokens` (`estimation.strategy: max_tokens` → 100/2000/absent reserve 100/2000/50),
-  **M4** weighted reconcile (gpt-4o 3000 / cached 2000 / completion 500 → `actual=1700`,
-  cached weight 0.1), **M5** compound `(model, tier)` keys, **M6** 429 +
-  `X-RateLimit-*-Tokens` (**on 429 only**), **M2** reserve→reconcile, **M7** `praxis_trl_*`
-  metrics + accounting logs. Model match via `model_to_header`→`X-Model` works at admission.
-  Caveats: enterprise exemption is **approximated** (huge-capacity rule; `token_rate_limit`
-  has no native "exempt" action); `x-tier` is currently a **client header**, not yet a
-  verified-JWT claim.
-- **P1** — deployed; #200 predicts M1 🟡, M5 ❌, M6 ✅, M7 🟡, S1 🟡; M2/M3/M4 N/A. Live
-  confirmation pending.
-- **P3, P4, K-TRLP, K-RLP** — not yet deployed/exercised (source-build spike for P3/P4).
+Per-offering results from exercising the gateways on the kind cluster. Feeds the M1–M7 scoring
+in the issue comment. (M1 = limited-vs-exempt + default; M5 = multiple budgets + keys.)
+
+### P2 — `token_rate_limit` (native) — LIVE VERIFIED: M1–M7 (all)
+
+Config: `config/praxis/p2/configmap.yaml` (upstream = MockServer, model-varied usage).
+- **M1** limited/exempt/default via tiered `rules` + a catch-all. **M2** reserve→reconcile
+  (`tokens_reserved_total` → `tokens_reconciled_total`). **M3** estimation tracks body
+  `max_tokens` (`strategy: max_tokens` → `max_tokens:100/2000/absent` reserve `100/2000/50`).
+  **M4** weighted reconcile (gpt-4o 3000/cached 2000/completion 500 → `actual=1700` with
+  `cached_input: 0.1`, not raw 3500). **M5** compound `(model, tier)` keys — `premium`
+  (gold+gpt-4o) / `gold-basic` / `silver-basic` discriminate by both. **M6** 429 +
+  `X-RateLimit-*-Tokens` (**on 429 only**, not on 200s). **M7** `praxis_trl_*` metrics +
+  accounting logs (`praxis_ai::token_rate_limit::accounting`).
+- **Model match via `model_to_header`→`X-Model` works at admission** (an earlier "model-match
+  fails" note was a non-reproducible config-iteration artifact).
+- Caveats: enterprise exemption is **approximated** (huge-capacity rule — `token_rate_limit`
+  has no native "exempt"/skip action, unlike the PPE/APL layer); `x-tier` is a **client
+  header**, not yet a verified-JWT claim.
+
+### P1 — core `rate_limit` (request-count)
+
+Deployed. #200 predicts **M1 🟡, M5 ❌, M6 ✅, M7 🟡, S1 🟡 (shadow); M2/M3/M4 N/A** (not
+token-denominated). Live confirmation pending.
+
+### P3 — PPE `quota/limitador` (token, standalone Limitador) — LIVE, ENFORCES (per-tier)
+
+Config: `config/praxis/p3/configmap.yaml` (policy doc: `identity/jwt` + `quota/limitador`) +
+`config/upstream/limitador-standalone.yaml`. Image: `praxis-ai:quota`.
+- **Build ✅ (no fork):** `experimental-quota` lives on `praxis-policy` 0.4.1 (the version
+  core pins as `ppe`); a server-crate Cargo overlay enables it by **feature unification** —
+  no `[patch]`, no core fork, no host-transport code (the core `policy` filter already
+  installs `PolicyHttpTransport` and `set_http_transport`s it).
+- **Deploy ✅:** `identity/jwt` verifies the issuer's RS256 JWT via JWKS-over-http
+  (`jwks_url` + `insecure_http: true`, `capabilities: [perform_http]`); the quota debit needs
+  the policy filter's **`body_access: read_write`**; quota HTTP to Limitador needs
+  `allow_private_idp: true`.
+- **Enforces end-to-end ✅** via a **three-layer** design:
+  - **Layer 1 — APL (M1):** `llm:"*"` route with `pre_invocation`/`post_invocation` steps
+    `when: claim.tier != "enterprise" → run(token-quota)`. Enterprise is **truly exempt**
+    (plugin never dispatched). `pre_invocation`→`cmf.llm_input` (check), `post_invocation`→
+    `cmf.llm_output` (debit) — **both** are needed (two handlers on two hooks).
+  - **Layer 2 — plugin:** `identity_claim: tier` (P3 can send one descriptor), so the budget
+    keys on the tier claim (exposed to APL via `claims: {include: [tier]}`).
+  - **Layer 3 — Limitador limits:** per-tier budgets selected by CEL **`descriptors[0]["tier"]`**
+    conditions (gold/silver + a default; enterprise matches no limit). Live: gold `200 200 403`,
+    silver `200 200 403`, enterprise `200×5`.
+- **Debit verified by instrumentation:** `QuotaReport` fires `/report` with the parsed
+  `total_tokens` every request. An earlier "debit never lands / no identity at `cmf.llm_output`"
+  conclusion was **wrong** — the debit always fired; the budget just wasn't enforcing because of
+  **Limitador config** (see gotchas: explicit `memory` storage + `descriptors[0][...]` CEL).
+- Caveats vs #200: **M2 ❌** soft cap (check probes delta=1, debit after — not a reservation);
+  **M6 ❌** over-budget denial is **403, not 429**, with no `X-RateLimit-*`/`Retry-After` (PPE
+  has no response-header injection); keys on **tier** (one descriptor) so it's per-tier, not
+  per-user; **M7 🟡** `tracing` logs only, no metrics.
+
+### Not yet exercised
+
+- **P4** (`ratelimit/limitador`, request-count, embedded — unmerged fork branch): the same
+  two-layer model applies (APL `when→run` for M1; plugin `conditions`/`variables` for M5); the
+  token/model parts need the unified `kind: limitador` (00134) + CMF-hook model binding (#292).
+- **K-TRLP / K-RLP** (Kuadrant on the Istio gateway).
+- Open: M5 budget **independence** (exhaust one, others unaffected) not yet exhaustion-tested;
+  verified-JWT-claim → `x-tier` wiring on P2 (currently a client header).
 
 ## How it's built
 
@@ -153,6 +205,15 @@ Verified working: 8×`200` (each with real `usage.total_tokens`) then `429`.
   strictly (`additionalProperties: false`); a `"//": "..."` key anywhere makes it reject the
   **entire** file → 0 expectations → every request 404/502. Keep
   `config/upstream/mockserver-expectations.json` comment-free.
+- **Standalone Limitador (P3) needs explicit storage + `descriptors[0][...]` CEL.** Run
+  `limitador-server <limits-file> memory` — with no `STORAGE` arg the limits load but are
+  never counted/enforced. And a limit's `conditions`/`variables` are CEL over the request's
+  descriptor list: reference an entry as **`descriptors[0]["tier"]`** (a bare `tier`, or an
+  empty `conditions: []` with `variables: [tier]`, does NOT match or count). The
+  `quota/limitador` plugin sends one descriptor keyed on its `identity_claim`.
+- **502 with no Praxis error log = the upstream returned 502** (Praxis passes it through; not
+  necessarily the private-IP dial guard). Enable `runtime.log_overrides` for
+  `pingora_core`/`pingora_proxy` at `debug` to see the real upstream response.
 - **`token-rate-limit-filter` is experimental.** Build with
   `PRAXIS_AI_FEATURES=full,token-rate-limit-filter` (set in `lib.sh`). Prebuilt
   `ghcr.io/praxis-proxy/ai` images do NOT include it. `scripts/05` clones the Praxis AI

@@ -1,0 +1,99 @@
+---
+# Standalone Limitador for offering P3 (PPE quota/limitador plugin).
+# The plugin POSTs {endpoint}/check (probe, delta=1) and {endpoint}/report
+# (debit, delta=tokens) with body {namespace, values:{sub:<id>}, delta}. Plaintext
+# HTTP on :8080 (the P3 policy doc sets insecure_http: true). Separate from
+# Kuadrant's own Limitador in kuadrant-system.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: limitador-standalone-limits
+  namespace: llm
+data:
+  limits.yaml: |
+    # Per-tier token budgets. The quota plugin sends one descriptor keyed on the
+    # identity_claim (`tier`). Limitador v2 CEL references descriptor entries as
+    # descriptors[0]["<key>"] -- a bare `tier` does NOT match. enterprise matches
+    # no limit -> unmetered here (and exempted at the APL layer). Small on purpose.
+    - namespace: praxis-p3-tokens
+      conditions: ['descriptors[0]["tier"] == "gold"']
+      variables: []
+      max_value: 7000
+      seconds: 60
+    - namespace: praxis-p3-tokens
+      conditions: ['descriptors[0]["tier"] == "silver"']
+      variables: []
+      max_value: 4000
+      seconds: 60
+    - namespace: praxis-p3-tokens
+      conditions:
+        - 'descriptors[0]["tier"] != "gold"'
+        - 'descriptors[0]["tier"] != "silver"'
+        - 'descriptors[0]["tier"] != "enterprise"'
+      variables: []
+      max_value: 2000
+      seconds: 60
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: limitador-standalone
+  namespace: llm
+  labels:
+    app: limitador-standalone
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: limitador-standalone
+  template:
+    metadata:
+      labels:
+        app: limitador-standalone
+    spec:
+      containers:
+        - name: limitador
+          image: quay.io/kuadrant/limitador:latest
+          imagePullPolicy: IfNotPresent
+          # Image ENTRYPOINT is already `limitador-server`; args = <LIMITS_FILE> <STORAGE>.
+          # `memory` keeps ephemeral in-process counters (without an explicit storage
+          # the loaded limits are not actually counted/enforced).
+          args:
+            - "/etc/limitador/limits.yaml"
+            - "memory"
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: grpc
+              containerPort: 8081
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          volumeMounts:
+            - name: limits
+              mountPath: /etc/limitador
+              readOnly: true
+      volumes:
+        - name: limits
+          configMap:
+            name: limitador-standalone-limits
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: limitador-standalone
+  namespace: llm
+  labels:
+    app: limitador-standalone
+spec:
+  selector:
+    app: limitador-standalone
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: grpc
+      port: 8081
+      targetPort: 8081
