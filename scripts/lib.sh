@@ -49,13 +49,23 @@ PRAXIS_AI_IMAGE_RATELIMIT="${PRAXIS_AI_IMAGE_RATELIMIT:-praxis-ai:ratelimit}"
 
 # Praxis core + policy sources for the P3/P4 from-source builds (see lib.sh notes).
 # P3 (quota/limitador) is merged on praxis-proxy/policy main.
-# P4 (ratelimit/limitador) lives only in draft PR #178 on the fork below.
+# P4 (ratelimit/limitador) lives only in OPEN PR #178 on praxis-proxy/policy,
+# authored from the fork maleck13/ppe-policy (branch proposal/limitador-plugin).
 PRAXIS_CORE_REPO="${PRAXIS_CORE_REPO:-https://github.com/praxis-proxy/praxis.git}"
-PRAXIS_CORE_REF="${PRAXIS_CORE_REF:-main}"
+# P4 pins core to the exact tag praxis-ai depends on (published praxis-proxy*
+# 0.7.5), then forward-ports its `policy` filter to the 0.5.0 engine API. Using
+# the tag (not main) keeps the praxis-ai<->core API stable so only the
+# engine-facing delta needs patching.
+PRAXIS_CORE_REF="${PRAXIS_CORE_REF:-v0.7.5}"
 PRAXIS_POLICY_REPO="${PRAXIS_POLICY_REPO:-https://github.com/praxis-proxy/policy.git}"
 PRAXIS_POLICY_REF="${PRAXIS_POLICY_REF:-main}"
-PRAXIS_POLICY_P4_REPO="${PRAXIS_POLICY_P4_REPO:-https://github.com/maleck13/policy.git}"
+# P4 source: the fork repo is `ppe-policy` (NOT `policy` -- that name 404s). If
+# the fork ever disappears, scripts/05-...-p4 falls back to fetching the PR head
+# ref (PRAXIS_POLICY_P4_PR_REF) from the base repo PRAXIS_POLICY_REPO, which keeps
+# the branch alive as refs/pull/178/head for as long as the PR is open.
+PRAXIS_POLICY_P4_REPO="${PRAXIS_POLICY_P4_REPO:-https://github.com/maleck13/ppe-policy.git}"
 PRAXIS_POLICY_P4_REF="${PRAXIS_POLICY_P4_REF:-proposal/limitador-plugin}"
+PRAXIS_POLICY_P4_PR_REF="${PRAXIS_POLICY_P4_PR_REF:-pull/178/head}"
 
 # Standalone Limitador (P3 backs onto this over HTTP).
 LIMITADOR_IMAGE="${LIMITADOR_IMAGE:-quay.io/kuadrant/limitador:latest}"

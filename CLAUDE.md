@@ -83,20 +83,56 @@ Config: `config/praxis/p3/configmap.yaml` (policy doc: `identity/jwt` + `quota/l
   has no response-header injection); keys on **tier** (one descriptor) so it's per-tier, not
   per-user; **M7 🟡** `tracing` logs only, no metrics.
 
+### P4 — PPE `ratelimit/limitador` (request-count, embedded Limitador) — LIVE, ENFORCES (per-tier)
+
+Config: `config/praxis/p4/configmap.yaml` (policy doc: `identity/jwt` + `ratelimit/limitador`).
+Image: `praxis-ai:ratelimit`. The plugin is from the **unmerged** PR praxis-proxy/policy#178.
+- **Build ✅ (forward-ported core):** the plugin exists only on the policy engine's **0.5.0** line
+  (PR #178), but praxis-ai pins the published core `praxis-proxy*` **0.7.5**, which requires
+  `praxis-policy ^0.4.1` and whose `policy` filter reads `RawInboundToken.source_header` — a field
+  0.5.0 removed (→ `source: Credential`). **No published or `main` core consumes policy 0.5.0**, so
+  the plugin can't be dragged in by a plain `[patch]` (core is recompiled against 0.5.0 and breaks).
+  `scripts/05-build-praxis-image-p4.sh` therefore vendors **both** the policy PR source and core
+  `v0.7.5`, `[patch.crates-io]`s the whole `praxis-policy*` + `praxis-proxy*` families to them,
+  relabels the engine 0.5.0→0.4.1 (to satisfy core's `^0.4.1`), and **forward-ports core's `policy`
+  filter** to the 0.5.0 `RawInboundToken` API. That forward-port is the ONLY core change the 0.4→0.5
+  delta needs (3 compile errors in one function — map `Credential::Header{name}` back to the old
+  `source_header`; skip the new cookie/query-param credential sources, which the header-strip step
+  never handled). All patches live in the build script (reproducible from a clean clone).
+- **Enforces end-to-end ✅** via a **two-layer** design. Limitador is **embedded, in-process** (no
+  standalone pod; counters reset on restart and are per-replica):
+  - **Layer 1 — APL (M1):** an `http: {path_prefix: /}` catch-all route runs `run(p4-ratelimit)`
+    only `when: claim.tier != "enterprise"` → enterprise is **truly exempt** (plugin never
+    dispatched). The plugin is **`http.request`-only** (pre-body), so this is an `http:` route, NOT
+    `llm:` (a CMF/`llm:` route with an http-only plugin is rejected at startup).
+  - **Layer 2 — plugin:** `bindings` expose PPE attrs as flat CEL vars (`tier: claim.tier`,
+    `subject_id`, `http_method`); `limits[]` carry CEL `conditions` over those bound vars and
+    `variables: [tier]` as the budget key (M5).
+  - Live: gold `200×5→429`, silver `200×2→429`, basic `200×3→429` (default catch-all), enterprise
+    `200×6` (exempt), notier `403` (missing `tier` binding denies **before** counting), and an
+    unauthenticated request → `401`. **M5 independence confirmed** — the per-tier counters are
+    separate (gold/silver/default each trip their own distinct limit within one run).
+- Scores vs #200: **M1 ✅**, **M5 ✅** (request-count budgets + per-tier keys), **M6 🟡** (over-budget
+  is **429** — better than P3's 403 — but no `X-RateLimit-*`/`Retry-After`; the plugin sets
+  `details["http.status"]=429` and core renders a plain 429), **M7 🟡** (`tracing` only, no metrics),
+  **M2/M3/M4 N/A** (request-count at `http.request`, pre-body → no tokens, no body-`model`).
+
 ### Not yet exercised
 
-- **P4** (`ratelimit/limitador`, request-count, embedded — unmerged fork branch): the same
-  two-layer model applies (APL `when→run` for M1; plugin `conditions`/`variables` for M5); the
-  token/model parts need the unified `kind: limitador` (00134) + CMF-hook model binding (#292).
-- **K-TRLP / K-RLP** (Kuadrant on the Istio gateway).
-- Open: M5 budget **independence** (exhaust one, others unaffected) not yet exhaustion-tested;
-  verified-JWT-claim → `x-tier` wiring on P2 (currently a client header).
+- **K-TRLP** (Kuadrant `TokenRateLimitPolicy` on the Istio gateway). *(K-RLP dropped by decision.)*
+- Open: verified-JWT-claim → `x-tier` wiring on P2 (currently a client header).
 
 ## How it's built
 
 - Praxis AI is built **from local source** (not the prebuilt ghcr image) because
   `token-rate-limit-filter` is an **experimental** cargo feature excluded from prebuilt builds.
   P3/P4 additionally need `experimental-quota` / `experimental-ratelimit` (policy engine).
+- **P3** enables its feature by **unification on the published `praxis-policy` 0.4.1** — no fork, no
+  `[patch]`. **P4** is heavier: its plugin only exists on the engine's **0.5.0** line, which the
+  pinned core 0.7.5 can't consume, so the P4 build **vendors + `[patch]`es both the engine (PR #178)
+  and core `v0.7.5`, and forward-ports core's `policy` filter to the 0.5.0 API** (see the P4 finding
+  above). Three source trees (`.cache/praxis-ai`, `…/vendor-core`, `…/vendor-policy`), all driven by
+  `scripts/05-build-praxis-image-p4.sh`.
 
 ## Layout
 
@@ -211,6 +247,14 @@ Verified working: 8×`200` (each with real `usage.total_tokens`) then `429`.
   descriptor list: reference an entry as **`descriptors[0]["tier"]`** (a bare `tier`, or an
   empty `conditions: []` with `variables: [tier]`, does NOT match or count). The
   `quota/limitador` plugin sends one descriptor keyed on its `identity_claim`.
+- **Embedded Limitador (P4) uses BARE CEL vars, not `descriptors[0][...]`.** The
+  `ratelimit/limitador` plugin runs an in-process `limitador::RateLimiter` over a flat CEL context
+  built from its `bindings` (PPE attr → variable name), so `conditions`/`variables` reference the
+  bound names directly (e.g. `tier == 'gold'`, `variables: [tier]`) — the standalone HTTP
+  descriptor form does NOT apply here. A bound attribute that is **missing or non-string denies**
+  the request (so a token with no `tier` claim is denied, not defaulted). Over-budget denial is
+  **429** (vs the `quota/limitador` 403). No standalone Limitador pod; counters are per-replica and
+  reset on restart.
 - **502 with no Praxis error log = the upstream returned 502** (Praxis passes it through; not
   necessarily the private-IP dial guard). Enable `runtime.log_overrides` for
   `pingora_core`/`pingora_proxy` at `debug` to see the real upstream response.

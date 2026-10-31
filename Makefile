@@ -1,7 +1,7 @@
 SHELL := /usr/bin/env bash
 SCRIPTS := ./scripts
 
-.PHONY: help setup cluster deps kuadrant upstream jwt-issuer limitador istio-gateway praxis-image praxis-image-p3 praxis praxis-p1 praxis-p2 praxis-p3 test cleanup
+.PHONY: help setup cluster deps kuadrant upstream jwt-issuer limitador istio-gateway praxis-image praxis-image-p3 praxis-image-p4 praxis praxis-p1 praxis-p2 praxis-p3 praxis-p4 test cleanup
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -47,6 +47,12 @@ praxis-image-p3: ## Build the P3 image (praxis-ai:quota, experimental-quota) + l
 
 praxis-p3: ## Deploy offering P3 (quota/limitador) -> ns praxis-p3, port 8083
 	$(SCRIPTS)/06-deploy-praxis-p3.sh
+
+praxis-image-p4: ## Build the P4 image (praxis-ai:ratelimit, experimental-ratelimit, PR #178) + load into kind
+	$(SCRIPTS)/05-build-praxis-image-p4.sh
+
+praxis-p4: ## Deploy offering P4 (ratelimit/limitador) -> ns praxis-p4, port 8084
+	$(SCRIPTS)/06-deploy-praxis-p4.sh
 
 test: ## Run the token rate limit test (needs port-forward praxis)
 	./test/test-token-rate-limit.sh

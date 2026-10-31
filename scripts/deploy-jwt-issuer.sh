@@ -4,7 +4,7 @@
 #
 #   scripts/deploy-jwt-issuer.sh
 #
-# Tokens are written to ${CACHE_DIR}/tokens/{gold,silver,enterprise,notier}.jwt
+# Tokens are written to ${CACHE_DIR}/tokens/{gold,silver,enterprise,basic,notier}.jwt
 # and the signing key stays local in ${CACHE_DIR}/jwt (gitignored).
 source "$(dirname "$0")/lib.sh"
 source "$(dirname "$0")/lib-jwt.sh"
@@ -29,4 +29,4 @@ log "Waiting for jwt-issuer to be ready"
 kc -n "${UPSTREAM_NAMESPACE}" rollout status deployment/jwt-issuer --timeout=180s
 
 log "JWT issuer ready. JWKS: ${JWT_JWKS_URL}"
-log "  tokens: ${JWT_TOKENS_DIR}/{gold,silver,enterprise,notier}.jwt"
+log "  tokens: ${JWT_TOKENS_DIR}/{gold,silver,enterprise,basic,notier}.jwt"

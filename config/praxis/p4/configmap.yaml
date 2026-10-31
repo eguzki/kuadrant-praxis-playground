@@ -1,0 +1,159 @@
+---
+# Offering P4 -- Praxis PPE `ratelimit/limitador` plugin (request-count, EMBEDDED
+# in-memory Limitador). From the unmerged PR praxis-proxy/policy#178.
+#
+# Chain: policy -> router -> load_balancer. The `policy` filter embeds the Praxis
+# Policy Engine; the policy document (policy.yaml below) declares:
+#   - identity/jwt        : verifies the issuer's RS256 JWT (JWKS over plaintext
+#                           http), maps sub -> subject.id, exposes `tier` claim
+#   - p4-ratelimit        : per-request-count budget keyed on the `tier` claim,
+#                           evaluated in-process (no external Limitador)
+#
+# Unlike P3 (quota/limitador, token, standalone Limitador over HTTP), this plugin:
+#   * runs at the `http.request` hook (PRE-body) -> request-COUNT only, never
+#     tokens and never the body `model` (M2/M3/M4 and model-keying are N/A);
+#   * keeps counters IN-PROCESS (limitador::RateLimiter), so no standalone
+#     Limitador Deployment and counters reset on pod restart / are per-replica;
+#   * on over-budget denies with HTTP 429 (sets details["http.status"]=429),
+#     which the gateway policy filter turns into a plain 429 (cf. P3's 403);
+#   * CEL in limits references the BOUND VARIABLE NAMES directly (e.g.
+#     `tier == 'gold'`), NOT the standalone descriptors[0][...] form.
+#
+# Requires image praxis-ai:ratelimit (experimental-ratelimit; scripts/05-...-p4).
+# `allow_private_idp: true` lets the JWKS fetch reach the in-cluster issuer
+# ClusterIP. No body_access is needed (the plugin never reads the body).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: praxis-ai-config
+  namespace: praxis-p4
+data:
+  praxis-ai.yaml: |
+    admin:
+      metrics_address: "0.0.0.0:9901"
+
+    listeners:
+      - name: ai
+        address: "0.0.0.0:8080"
+        filter_chains:
+          - main
+
+    filter_chains:
+      - name: main
+        filters:
+          - filter: policy
+            config_path: /etc/praxis/policy.yaml
+            # Permit the policy-engine JWKS fetch to reach a private cluster
+            # ClusterIP. No body_access: the plugin acts at http.request only.
+            allow_private_idp: true
+
+          - filter: router
+            routes:
+              - path: "/v1/chat/completions"
+                cluster: openai_backend
+              - path: "/v1/embeddings"
+                cluster: openai_backend
+              - path_prefix: "/v1/models"
+                cluster: openai_backend
+              - path: "/v1/messages"
+                cluster: anthropic_backend
+              - path_prefix: "/v1beta/models/"
+                cluster: gemini_backend
+
+          - filter: access_log
+
+          - filter: load_balancer
+            clusters:
+              - name: openai_backend
+                endpoints:
+                  - "mock-llm.llm.svc.cluster.local:1080"
+              - name: anthropic_backend
+                endpoints:
+                  - "mock-llm.llm.svc.cluster.local:1080"
+              - name: gemini_backend
+                endpoints:
+                  - "mock-llm.llm.svc.cluster.local:1080"
+
+    insecure_options:
+      allow_private_upstreams: true
+      allow_private_endpoints: true
+
+  policy.yaml: |
+    plugins:
+      - name: jwt-user
+        kind: identity/jwt
+        hooks: [identity.resolve]
+        on_error: fail
+        # Needs perform_http to fetch the JWKS from the issuer.
+        capabilities: [perform_http]
+        config:
+          header: Authorization
+          trusted_issuers:
+            - issuer: "https://jwt-issuer.praxis.local"
+              audiences: ["praxis-playground"]
+              algorithms: ["RS256"]
+              decoding_key:
+                kind: jwks_url
+                url: "http://jwt-issuer.llm.svc.cluster.local:8080/.well-known/jwks.json"
+                insecure_http: true
+          claim_mapper: standard
+          # Expose the custom `tier` claim so the ratelimit bindings can read it.
+          claims:
+            include: [tier]
+
+      - name: p4-ratelimit
+        kind: ratelimit/limitador
+        hooks: [http.request]
+        mode: sequential
+        # read_subject -> subject.id; read_headers -> http.method; read_claims ->
+        # claim.tier. A missing/non-string bound attribute DENIES the request.
+        capabilities: [read_subject, read_headers, read_claims]
+        config:
+          namespace: praxis-p4-requests
+          counter_capacity: 1000
+          # Bind PPE attributes to flat CEL variable names used by the limits.
+          bindings:
+            subject_id: subject.id
+            http_method: http.method
+            tier: claim.tier
+          # M5: multiple budgets, each keyed (`variables`) on the tier claim so
+          # the per-tier counters are independent. Small on purpose (easy 429).
+          # enterprise matches no limit here (and is exempt at the APL layer).
+          limits:
+            - max: 5
+              seconds: 60
+              conditions: ["tier == 'gold'"]
+              variables: ["tier"]
+            - max: 2
+              seconds: 60
+              conditions: ["tier == 'silver'"]
+              variables: ["tier"]
+            # Default/catch-all for any other authenticated tier (e.g. `basic`).
+            - max: 3
+              seconds: 60
+              conditions:
+                - "tier != 'gold'"
+                - "tier != 'silver'"
+                - "tier != 'enterprise'"
+              variables: ["tier"]
+
+    global:
+      authentication:
+        - jwt-user
+      authorization:
+        pre_invocation:
+          - "require(authenticated)"
+
+    # M1 (applicability) at the APL layer: an HTTP catch-all route runs the
+    # request limiter for everyone EXCEPT enterprise -> enterprise is truly
+    # exempt (the http.request plugin is never dispatched for it). The plugin is
+    # HTTP-only, so this is an `http:` route, NOT an `llm:` route (declaring an
+    # llm/tool route with an http.request-only plugin is rejected at startup).
+    routes:
+      - http:
+          path_prefix: /
+        authorization:
+          pre_invocation:
+            - when: 'claim.tier != "enterprise"'
+              do:
+                - "run(p4-ratelimit)"

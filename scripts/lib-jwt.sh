@@ -2,7 +2,10 @@
 # JWT test-issuer helpers (static JWKS, RS256) for the acceptance tests.
 #
 # Generates an RSA keypair + a JWKS document and mints long-lived test tokens
-# carrying a `tier` claim (gold / silver / enterprise) plus one with no tier.
+# carrying a `tier` claim (gold / silver / enterprise / basic) plus one with no
+# tier. `basic` exercises an offering's default/catch-all budget (a tier that is
+# neither exempt nor one of the named premium tiers); `notier` exercises the
+# "claim absent" path.
 # Everything is written under ${CACHE_DIR} (gitignored). Pure openssl — no
 # python/pyjwt/step dependency.
 #
@@ -91,12 +94,13 @@ jwt_mint_all() {
   jwt_mint "user-gold"       "gold"       > "${JWT_TOKENS_DIR}/gold.jwt"
   jwt_mint "user-silver"     "silver"     > "${JWT_TOKENS_DIR}/silver.jwt"
   jwt_mint "user-enterprise" "enterprise" > "${JWT_TOKENS_DIR}/enterprise.jwt"
+  jwt_mint "user-basic"      "basic"      > "${JWT_TOKENS_DIR}/basic.jwt"
   jwt_mint "user-notier"                  > "${JWT_TOKENS_DIR}/notier.jwt"
-  log "Minted test tokens in ${JWT_TOKENS_DIR}: gold, silver, enterprise, notier"
+  log "Minted test tokens in ${JWT_TOKENS_DIR}: gold, silver, enterprise, basic, notier"
 }
 
-# Convenience: echo a token for a tier (gold|silver|enterprise|notier), minting
-# the set first if needed.
+# Convenience: echo a token for a tier (gold|silver|enterprise|basic|notier),
+# minting the set first if needed.
 jwt_token() {
   local which="$1"
   [ -f "${JWT_TOKENS_DIR}/${which}.jwt" ] || jwt_mint_all >&2
