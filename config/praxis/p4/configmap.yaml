@@ -1,27 +1,35 @@
 ---
 # Offering P4 -- Praxis PPE `ratelimit/limitador` plugin (request-count, EMBEDDED
-# in-memory Limitador). From the unmerged PR praxis-proxy/policy#178.
+# in-memory Limitador). Plugin from praxis-proxy/policy (merged PR #178, engine
+# 0.5.0 line).
 #
 # Chain: policy -> router -> load_balancer. The `policy` filter embeds the Praxis
 # Policy Engine; the policy document (policy.yaml below) declares:
-#   - identity/jwt        : verifies the issuer's RS256 JWT (JWKS over plaintext
-#                           http), maps sub -> subject.id, exposes `tier` claim
-#   - p4-ratelimit        : per-request-count budget keyed on the `tier` claim,
-#                           evaluated in-process (no external Limitador)
+#   - identity/jwt   : verifies the issuer's RS256 JWT (JWKS over plaintext http),
+#                      maps sub -> subject.id, exposes `tier` claim
+#   - p4-ratelimit   : per-request-count budget keyed on the `tier` claim,
+#                      evaluated in-process, at the ratelimit.post_identity hook
 #
-# Unlike P3 (quota/limitador, token, standalone Limitador over HTTP), this plugin:
-#   * runs at the `http.request` hook (PRE-body) -> request-COUNT only, never
-#     tokens and never the body `model` (M2/M3/M4 and model-keying are N/A);
-#   * keeps counters IN-PROCESS (limitador::RateLimiter), so no standalone
-#     Limitador Deployment and counters reset on pod restart / are per-replica;
-#   * on over-budget denies with HTTP 429 (sets details["http.status"]=429),
-#     which the gateway policy filter turns into a plain 429 (cf. P3's 403);
-#   * CEL in limits references the BOUND VARIABLE NAMES directly (e.g.
-#     `tier == 'gold'`), NOT the standalone descriptors[0][...] form.
+# MERGED-DESIGN NOTE: the ratelimit plugin now runs at the new engine hooks
+# `ratelimit.pre_identity` / `ratelimit.post_identity` (NOT `http.request`, and it
+# "cannot run from an APL run(name) step"). The host (core's policy filter) must
+# invoke those hooks around identity resolution -- that wiring is tracked upstream
+# by praxis-proxy/praxis#1478 and is NOT in any released core, so the P4 image
+# carries a minimal forward-port that invokes ratelimit.post_identity after
+# identity.resolve (see scripts/05-build-praxis-image-p4.sh).
 #
-# Requires image praxis-ai:ratelimit (experimental-ratelimit; scripts/05-...-p4).
-# `allow_private_idp: true` lets the JWKS fetch reach the in-cluster issuer
-# ClusterIP. No body_access is needed (the plugin never reads the body).
+# Config shape (merged design):
+#   * the plugin declares its stage via `hooks: [ratelimit.post_identity]`;
+#   * a `rate_limits:` list (here at `global`) SELECTS the limiter (like
+#     `authentication:` selects identity resolvers) -- NOT authorization/run();
+#   * enterprise exemption falls out of the limit CONDITIONS (no limit matches
+#     tier == enterprise -> unmetered), so there is no APL when-gate;
+#   * over-budget denial is HTTP 429; a missing/non-string bound attribute denies
+#     (so a token with no `tier` claim is denied, not defaulted).
+#
+# Requires image praxis-ai:ratelimit (experimental-ratelimit + the #1478 host
+# forward-port). `allow_private_idp: true` lets the JWKS fetch reach the in-cluster
+# issuer ClusterIP. No body_access (the plugin acts pre-body, around identity).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -44,7 +52,7 @@ data:
           - filter: policy
             config_path: /etc/praxis/policy.yaml
             # Permit the policy-engine JWKS fetch to reach a private cluster
-            # ClusterIP. No body_access: the plugin acts at http.request only.
+            # ClusterIP. No body_access: the plugin acts around identity.resolve.
             allow_private_idp: true
 
           - filter: router
@@ -87,7 +95,10 @@ data:
         # Needs perform_http to fetch the JWKS from the issuer.
         capabilities: [perform_http]
         config:
-          header: Authorization
+          # Merged engine prefers `credential:` over the deprecated `header:`.
+          credential:
+            kind: header
+            name: Authorization
           trusted_issuers:
             - issuer: "https://jwt-issuer.praxis.local"
               audiences: ["praxis-playground"]
@@ -103,7 +114,10 @@ data:
 
       - name: p4-ratelimit
         kind: ratelimit/limitador
-        hooks: [http.request]
+        # The stage is selected by the hook the plugin declares. post_identity
+        # lets limits key on the resolved subject/claims (vs pre_identity, which
+        # runs before token verification and keys on client address).
+        hooks: [ratelimit.post_identity]
         mode: sequential
         # read_subject -> subject.id; read_headers -> http.method; read_claims ->
         # claim.tier. A missing/non-string bound attribute DENIES the request.
@@ -118,7 +132,8 @@ data:
             tier: claim.tier
           # M5: multiple budgets, each keyed (`variables`) on the tier claim so
           # the per-tier counters are independent. Small on purpose (easy 429).
-          # enterprise matches no limit here (and is exempt at the APL layer).
+          # enterprise matches NO limit here -> unmetered (M1 exemption via
+          # conditions, no APL when-gate needed).
           limits:
             - max: 5
               seconds: 60
@@ -128,7 +143,8 @@ data:
               seconds: 60
               conditions: ["tier == 'silver'"]
               variables: ["tier"]
-            # Default/catch-all for any other authenticated tier (e.g. `basic`).
+            # Default/catch-all for any other authenticated tier (e.g. `basic`);
+            # excludes enterprise so enterprise stays unmetered.
             - max: 3
               seconds: 60
               conditions:
@@ -140,20 +156,15 @@ data:
     global:
       authentication:
         - jwt-user
+      # SELECT the rate limiter (merged design: like `authentication:` selects
+      # identity resolvers). The plugin's `hooks:` picks the stage; this list
+      # wires it in. NOT an APL authorization/run() step (which the merged engine
+      # rejects for a rate-limit-only plugin).
+      rate_limits:
+        - p4-ratelimit
+      # require(authenticated) keeps the http.request authorization path active,
+      # which is where the host forward-port invokes ratelimit.post_identity
+      # (after identity.resolve); it also rejects unauthenticated calls (401).
       authorization:
         pre_invocation:
           - "require(authenticated)"
-
-    # M1 (applicability) at the APL layer: an HTTP catch-all route runs the
-    # request limiter for everyone EXCEPT enterprise -> enterprise is truly
-    # exempt (the http.request plugin is never dispatched for it). The plugin is
-    # HTTP-only, so this is an `http:` route, NOT an `llm:` route (declaring an
-    # llm/tool route with an http.request-only plugin is rejected at startup).
-    routes:
-      - http:
-          path_prefix: /
-        authorization:
-          pre_invocation:
-            - when: 'claim.tier != "enterprise"'
-              do:
-                - "run(p4-ratelimit)"

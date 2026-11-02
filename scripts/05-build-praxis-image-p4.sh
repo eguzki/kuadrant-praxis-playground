@@ -2,31 +2,24 @@
 # Build the P4 Praxis AI image (praxis-ai:ratelimit) from source with the PPE
 # `ratelimit/limitador` plugin (embedded, request-count) enabled.
 #
-# Why this is more involved than P3 (quota):
-#   The ratelimit plugin exists only on the unmerged PR praxis-proxy/policy#178,
-#   which sits on the policy engine's 0.5.0 line. But praxis-ai pins the PUBLISHED
-#   core praxis-proxy* 0.7.5, and that core requires praxis-policy ^0.4.1 and its
-#   `policy` filter reads `RawInboundToken.source_header` -- a field 0.5.0 removed
-#   (now `source: Credential`). No published OR main core consumes policy 0.5.0.
-#   So to get the plugin we must:
-#     (a) vendor BOTH the policy PR source AND the core source into the build,
-#     (b) [patch.crates-io] the whole praxis-policy* AND praxis-proxy* families to
-#         those local copies,
-#     (c) relabel the vendored engine 0.5.0 -> 0.4.1 so it satisfies core's ^0.4.1,
-#     (d) forward-port core's `policy` filter to the 0.5.0 RawInboundToken API
-#         (map Credential::Header{name} back to the old source_header; skip the
-#         new cookie/query-param sources). This is the ONLY core code change the
-#         0.4->0.5 delta requires (verified: 3 compile errors, all in one fn).
+# PR praxis-proxy/policy#178 is MERGED, so the engine builds from the policy
+# repo's main. The merged plugin runs at NEW engine hooks `ratelimit.pre_identity`
+# / `ratelimit.post_identity` (NOT `http.request`, and it "cannot run from an APL
+# run(name) step"). The HOST (core's `policy` filter) must invoke those hooks
+# around identity resolution -- tracked upstream by praxis-proxy/praxis#1478 and
+# NOT in any released core. So this build vendors both the engine (policy main)
+# and core (v0.7.5) and patches core to:
+#   (A) compile against the 0.5.0 engine  -- RawInboundToken.source_header was
+#       removed (-> source: Credential); and
+#   (B) implement the #1478 host wiring (post-identity subset) -- invoke
+#       ratelimit.post_identity after the header-phase identity.resolve, gated by
+#       has_hooks_for, denying with the violation's HTTP status.
+# (Pre-identity + client-address + MCP site are the rest of #1478; not needed for
+# P4's tier/subject-keyed limits, so deliberately omitted.)
 #
-# BEST-EFFORT SPIKE: if upstream changes shift that delta, the build fails -- the
-# finding (core cannot consume policy 0.5.0 without this forward-port) stands.
-#
-# The praxis-ai Containerfile copies source explicitly (no `COPY . .`) and builds
-# in docker, so both vendored trees live INSIDE the context (vendor-core,
-# vendor-policy) and a generated Containerfile.p4 copies them before the build.
-#
-# Reuses the praxis-ai checkout from scripts/05 (PRAXIS_AI_SRC); resets the files
-# it overlays first, so it is reproducible and independent of P3's overlay.
+# The engine 0.5.0 is relabelled 0.4.1 so it satisfies core's praxis-policy ^0.4.1.
+# All patches live in this script (reproducible from a clean clone); each guards
+# against a shifted upstream and fails loudly rather than silently.
 source "$(dirname "$0")/lib.sh"
 
 require "${CONTAINER_ENGINE}" kind git python3
@@ -34,6 +27,7 @@ require "${CONTAINER_ENGINE}" kind git python3
 VENDOR_POLICY="${PRAXIS_AI_SRC}/vendor-policy"
 VENDOR_CORE="${PRAXIS_AI_SRC}/vendor-core"
 CONTAINERFILE_P4="${PRAXIS_AI_SRC}/Containerfile.p4"
+CORE_FILTER_REL="crates/filter/src/builtins/http/security/policy/filter.rs"
 
 # ---------------------------------------------------------------------------
 # 1. praxis-ai source + reset overlay files
@@ -47,50 +41,47 @@ log "Resetting praxis-ai overlay files to pristine (Cargo.toml, server/Cargo.tom
 git -C "${PRAXIS_AI_SRC}" checkout -- Cargo.toml server/Cargo.toml 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# 2. Vendor the PR #178 policy workspace; relabel 0.5.0 -> 0.4.1
+# 2. Vendor the policy engine from main (merged plugin); relabel 0.5.0 -> 0.4.1
 # ---------------------------------------------------------------------------
-log "Fetching P4 policy source (PR #178) into ${VENDOR_POLICY}"
+log "Fetching policy engine (${PRAXIS_POLICY_REPO} @ ${PRAXIS_POLICY_REF}) into ${VENDOR_POLICY}"
 rm -rf "${VENDOR_POLICY}"
-if git clone --depth 1 --branch "${PRAXIS_POLICY_P4_REF}" "${PRAXIS_POLICY_P4_REPO}" "${VENDOR_POLICY}" 2>/dev/null; then
-  log "Cloned fork ${PRAXIS_POLICY_P4_REPO} (${PRAXIS_POLICY_P4_REF})"
-else
-  warn "Fork clone failed; falling back to ${PRAXIS_POLICY_P4_PR_REF} from ${PRAXIS_POLICY_REPO}"
-  git init -q "${VENDOR_POLICY}"
-  git -C "${VENDOR_POLICY}" remote add origin "${PRAXIS_POLICY_REPO}"
-  git -C "${VENDOR_POLICY}" fetch --depth 1 origin "${PRAXIS_POLICY_P4_PR_REF}"
-  git -C "${VENDOR_POLICY}" checkout -q FETCH_HEAD
-fi
+git clone --depth 1 --branch "${PRAXIS_POLICY_REF}" "${PRAXIS_POLICY_REPO}" "${VENDOR_POLICY}"
 rm -rf "${VENDOR_POLICY}/.git" "${VENDOR_POLICY}/target"
 
 log "Relabelling vendored praxis-policy* version 0.5.0 -> 0.4.1 (satisfies core ^0.4.1)"
 python3 -I - "${VENDOR_POLICY}/Cargo.toml" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
-# Every 0.5.0 in the PR root Cargo.toml is a praxis-policy* version pin (workspace
-# version + 7 path-dep pins); members inherit via version.workspace=true.
+# Every 0.5.0 in the policy root Cargo.toml is a praxis-policy* version pin
+# (workspace version + 7 path-dep pins); members inherit via version.workspace.
 n = s.count('"0.5.0"'); open(p, "w").write(s.replace('"0.5.0"', '"0.4.1"'))
 print(f"relabelled {n} version string(s)")
 PY
 
 # ---------------------------------------------------------------------------
-# 3. Vendor core @ the pinned tag; forward-port its policy filter to 0.5.0
+# 3. Vendor core @ the pinned tag; forward-port its policy filter (A + B + C)
 # ---------------------------------------------------------------------------
 log "Fetching core (${PRAXIS_CORE_REF}) into ${VENDOR_CORE}"
 rm -rf "${VENDOR_CORE}"
 git clone --depth 1 --branch "${PRAXIS_CORE_REF}" "${PRAXIS_CORE_REPO}" "${VENDOR_CORE}"
 rm -rf "${VENDOR_CORE}/.git" "${VENDOR_CORE}/target"
 
-log "Forward-porting core policy filter to the praxis-policy 0.5.0 RawInboundToken API (idempotent)"
-python3 -I - "${VENDOR_CORE}/crates/filter/src/builtins/http/security/policy/filter.rs" <<'PY'
+log "Patching core policy filter (A imports, B source_header, C #1478 post_identity wiring)"
+python3 -I - "${VENDOR_CORE}/${CORE_FILTER_REL}" <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
-changed = False
-# (a) bring Credential into scope
-old_use = 'extensions::{LLMExtension, LlmRequestDocument, MetaExtension},'
-new_use = 'extensions::{Credential, LLMExtension, LlmRequestDocument, MetaExtension},'
-if old_use in s:
-    s = s.replace(old_use, new_use, 1); changed = True
-# (b) map source_header -> Credential::Header{name}; skip cookie/query sources
+
+# (A) imports: bring Credential (for B) and the post-identity hook (for C) in scope.
+old_use = '    extensions::{LLMExtension, LlmRequestDocument, MetaExtension},'
+new_use = ('    extensions::{Credential, LLMExtension, LlmRequestDocument, MetaExtension},\n'
+           '    ratelimit_hook::HOOK_RATELIMIT_POST_IDENTITY,')
+a_done = 'ratelimit_hook::HOOK_RATELIMIT_POST_IDENTITY,' in s
+if not a_done:
+    if old_use not in s:
+        sys.exit("ERROR(A): import anchor missing; core source shifted")
+    s = s.replace(old_use, new_use, 1)
+
+# (B) compile against 0.5.0: map the removed source_header to Credential::Header.
 old_loop = '''        for inbound in raw.inbound_tokens.values() {
             let normalized = inbound.source_header.to_ascii_lowercase();
             if attached_outbound.contains(&normalized) {
@@ -106,12 +97,8 @@ old_loop = '''        for inbound in raw.inbound_tokens.values() {
                 );
             }'''
 new_loop = '''        for inbound in raw.inbound_tokens.values() {
-            // [playground P4 overlay] praxis-policy 0.5.0 replaced the inbound
-            // token's `source_header: String` with `source: Credential`. Only a
-            // header-sourced credential has an inbound header to strip, so map
-            // `Credential::Header { name }` back to the old `source_header` and
-            // skip the new cookie / query-param sources (which 0.4.1 could not
-            // represent and which this strip step never handled).
+            // [playground P4 overlay] 0.5.0 replaced source_header: String with
+            // source: Credential; map Credential::Header{name} back, skip cookie/query.
             let Credential::Header { name: source_header } = &inbound.source else {
                 continue;
             };
@@ -128,16 +115,50 @@ new_loop = '''        for inbound in raw.inbound_tokens.values() {
                     "inbound source_header is not a valid HTTP header name; cannot strip",
                 );
             }'''
-if old_loop in s:
-    s = s.replace(old_loop, new_loop, 1); changed = True
+b_done = 'Credential::Header { name: source_header }' in s
+if not b_done:
+    if old_loop not in s:
+        sys.exit("ERROR(B): source_header anchor missing; core source shifted")
+    s = s.replace(old_loop, new_loop, 1)
+
+# (C) #1478 host wiring (post-identity subset): invoke ratelimit.post_identity
+# after the header-phase identity.resolve, before the http.request hook.
+anchor = '''        Self::attach_http_attributes(ctx, &mut extensions, headers);
+
+        // Awaited on the worker runtime on purpose.'''
+block = '''        Self::attach_http_attributes(ctx, &mut extensions, headers);
+
+        // [playground P4 overlay] Host integration for the ratelimit/limitador
+        // plugin (praxis-proxy/praxis#1478, post-identity subset): after
+        // identity.resolve, invoke ratelimit.post_identity keyed on the resolved
+        // identity. Gated by has_hooks_for so a policy with no rate_limits: list is
+        // unaffected. A denial stops the request with the violation's HTTP status
+        // (429/401/400/503) via the same mapper http.request denials use.
+        if self.mgr.has_hooks_for(HOOK_RATELIMIT_POST_IDENTITY) {
+            let (rl_result, _rl_bg) = self
+                .mgr
+                .invoke_named::<HttpHook>(HOOK_RATELIMIT_POST_IDENTITY, HttpPayload, extensions.clone(), None)
+                .await;
+            if !rl_result.continue_processing {
+                tracing::debug!(target: "policy.filter", "ratelimit.post_identity deny (on_request)");
+                return Ok(FilterAction::Reject(super::error::http_authz_rejection(
+                    rl_result.violation.as_ref(),
+                )));
+            }
+        }
+
+        // Awaited on the worker runtime on purpose.'''
+c_done = 'ratelimit.post_identity deny (on_request)' in s
+if not c_done:
+    if anchor not in s:
+        sys.exit("ERROR(C): post_identity injection anchor missing; core source shifted")
+    s = s.replace(anchor, block, 1)
+
 open(p, "w").write(s)
-if changed:
-    print("core filter.rs forward-port applied")
-elif 'Credential::Header { name: source_header }' in s:
-    print("core filter.rs forward-port already present")
-else:
-    sys.exit("ERROR: core filter.rs did not match the expected 0.7.5 source; "
-             "the 0.4->0.5 delta may have shifted -- re-verify the forward-port")
+print("core patches: A=%s B=%s C=%s" % (
+    "present" if a_done else "applied",
+    "present" if b_done else "applied",
+    "present" if c_done else "applied"))
 PY
 
 # ---------------------------------------------------------------------------
@@ -159,7 +180,7 @@ if "praxis-policy = {" not in s:
         'praxis-core = { workspace = true }',
         'praxis-core = { workspace = true }\n'
         '# [playground overlay] P4: direct praxis-policy dep; [patch] (root Cargo.toml)\n'
-        '# redirects it to the vendored PR #178 source so experimental-ratelimit builds.\n'
+        '# redirects it to the vendored policy-main source so experimental-ratelimit builds.\n'
         'praxis-policy = { version = "=0.4.1", optional = true, default-features = false }',
         1); changed = True
 open(p, "w").write(s)
@@ -176,12 +197,17 @@ p = sys.argv[1]; s = open(p).read()
 if 'exclude' not in s.split('[workspace.package]')[0]:
     s = s.replace('resolver = "3"',
                   'resolver = "3"\nexclude = ["vendor-core", "vendor-policy"]', 1)
+# The merged ratelimit plugin refuses to load on a panic=abort build (it must be
+# able to catch Limitador's panic on a bad CEL condition). Release profile pins
+# panic = "abort"; flip it to "unwind" for this build. (The only "abort" value;
+# the lint `panic = "deny"` elsewhere is unaffected.)
+s = s.replace('panic = "abort"', 'panic = "unwind"', 1)
 if '[patch.crates-io]' not in s:
     patch = '''
 # [playground overlay] P4: redirect the praxis-proxy* (core) and praxis-policy*
 # (engine) families to the vendored sources. core = tag v0.7.5 with the policy
-# filter forward-ported to the 0.5.0 engine; engine = PR #178 (0.5.0) relabelled
-# to 0.4.1 so it satisfies core's ^0.4.1.
+# filter forward-ported (compile shim + #1478 post-identity host wiring); engine =
+# policy main (merged PR #178) relabelled to 0.4.1 so it satisfies core's ^0.4.1.
 [patch.crates-io]
 praxis-proxy = { path = "vendor-core/crates/server" }
 praxis-proxy-core = { path = "vendor-core/crates/core" }
@@ -212,9 +238,8 @@ s = open(src).read()
 anchor = "COPY Cargo.toml Cargo.lock ./"
 if anchor not in s:
     sys.exit("Containerfile layout changed: anchor not found")
-# [patch] path deps must exist before the first (dependency-cache) cargo build.
 s = s.replace(anchor,
-              anchor + "\n# [playground overlay] P4: vendored core + PR #178 policy for [patch].\n"
+              anchor + "\n# [playground overlay] P4: vendored core + policy-main for [patch].\n"
               "COPY vendor-core ./vendor-core\n"
               "COPY vendor-policy ./vendor-policy", 1)
 open(dst, "w").write(s)

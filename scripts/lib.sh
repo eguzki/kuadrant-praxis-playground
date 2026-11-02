@@ -48,9 +48,9 @@ PRAXIS_AI_IMAGE_QUOTA="${PRAXIS_AI_IMAGE_QUOTA:-praxis-ai:quota}"
 PRAXIS_AI_IMAGE_RATELIMIT="${PRAXIS_AI_IMAGE_RATELIMIT:-praxis-ai:ratelimit}"
 
 # Praxis core + policy sources for the P3/P4 from-source builds (see lib.sh notes).
-# P3 (quota/limitador) is merged on praxis-proxy/policy main.
-# P4 (ratelimit/limitador) lives only in OPEN PR #178 on praxis-proxy/policy,
-# authored from the fork maleck13/ppe-policy (branch proposal/limitador-plugin).
+# P3 (quota/limitador) and P4 (ratelimit/limitador, merged PR #178) both live on
+# praxis-proxy/policy main; P4 additionally needs a core forward-port (see below
+# and scripts/05-build-praxis-image-p4.sh) for praxis-proxy/praxis#1478.
 PRAXIS_CORE_REPO="${PRAXIS_CORE_REPO:-https://github.com/praxis-proxy/praxis.git}"
 # P4 pins core to the exact tag praxis-ai depends on (published praxis-proxy*
 # 0.7.5), then forward-ports its `policy` filter to the 0.5.0 engine API. Using
@@ -59,13 +59,12 @@ PRAXIS_CORE_REPO="${PRAXIS_CORE_REPO:-https://github.com/praxis-proxy/praxis.git
 PRAXIS_CORE_REF="${PRAXIS_CORE_REF:-v0.7.5}"
 PRAXIS_POLICY_REPO="${PRAXIS_POLICY_REPO:-https://github.com/praxis-proxy/policy.git}"
 PRAXIS_POLICY_REF="${PRAXIS_POLICY_REF:-main}"
-# P4 source: the fork repo is `ppe-policy` (NOT `policy` -- that name 404s). If
-# the fork ever disappears, scripts/05-...-p4 falls back to fetching the PR head
-# ref (PRAXIS_POLICY_P4_PR_REF) from the base repo PRAXIS_POLICY_REPO, which keeps
-# the branch alive as refs/pull/178/head for as long as the PR is open.
-PRAXIS_POLICY_P4_REPO="${PRAXIS_POLICY_P4_REPO:-https://github.com/maleck13/ppe-policy.git}"
-PRAXIS_POLICY_P4_REF="${PRAXIS_POLICY_P4_REF:-proposal/limitador-plugin}"
-PRAXIS_POLICY_P4_PR_REF="${PRAXIS_POLICY_P4_PR_REF:-pull/178/head}"
+# P4 source: PR #178 (ratelimit/limitador) is MERGED, so P4 builds the engine from
+# the policy repo's main (PRAXIS_POLICY_REPO @ PRAXIS_POLICY_REF, both above). The
+# merged plugin runs at the new engine hooks `ratelimit.pre_identity` /
+# `ratelimit.post_identity`, which no released core invokes yet
+# (praxis-proxy/praxis#1478); scripts/05-...-p4 carries a minimal host forward-port
+# in core's `policy` filter that invokes ratelimit.post_identity after identity.
 
 # Standalone Limitador (P3 backs onto this over HTTP).
 LIMITADOR_IMAGE="${LIMITADOR_IMAGE:-quay.io/kuadrant/limitador:latest}"
