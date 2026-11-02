@@ -28,7 +28,9 @@ hook). See the comparison doc (gist) for the full per-criterion analysis.
 ## Live-validation findings (issue #200)
 
 Per-offering results from exercising the gateways on the kind cluster. Feeds the M1–M7 scoring
-in the issue comment. (M1 = limited-vs-exempt + default; M5 = multiple budgets + keys.)
+in the issue comment. (M1 = limited-vs-exempt + default; M5 = multiple budgets + keys.) The
+**per-criterion acceptance procedures + the Observed results matrix** live in
+[`docs/acceptance-tests.md`](docs/acceptance-tests.md); this section is the narrative detail.
 
 ### P2 — `token_rate_limit` (native) — LIVE VERIFIED: M1–M7 (all)
 
@@ -196,7 +198,7 @@ scripts/
   04-deploy-istio-gateway.sh  # Istio Gateway + HTTPRoute to upstream
   05-build-praxis-image.sh    # docker build praxis-ai (experimental features) + kind load
   06-deploy-praxis.sh         # Praxis AI gateway Deployment/Service/ConfigMap
-  setup.sh                    # runs 00..06 in order (idempotent)
+  setup.sh                    # one-command full stack: cluster -> infra -> P1-P4 -> K-TRLP (idempotent; P3/P4 spikes best-effort)
   cleanup.sh                  # delete kind cluster
 config/
   kind/kind-config.yaml
