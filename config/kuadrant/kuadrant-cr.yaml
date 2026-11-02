@@ -6,4 +6,16 @@ kind: Kuadrant
 metadata:
   name: kuadrant
   namespace: kuadrant-system
-spec: {}
+spec:
+  # Token rate limiting (K-TRLP) enforcement mode.
+  #   Reservation = reserve an ESTIMATE on request arrival, then commit the actual
+  #     usage.total_tokens once the upstream responds (release the over-reservation).
+  #     This is the proposal's M2 (reserve->reconcile) + M3 (estimation) model, and
+  #     it is what Kuadrant's TokenRateLimitPolicy is for -- so K-TRLP MUST use it.
+  #   Optimistic = allow then count-after-response (no reservation) -> would fail
+  #     M2/M3; only used earlier as a workaround for a wasm EvaluationError that was
+  #     actually the unexposed-claim bug (fixed in authpolicy.yaml), not Reservation.
+  # Reservation requires each limit to set a non-zero reservation.amount (default 0
+  # short-circuits to Optimistic); see tokenratelimitpolicy.yaml.
+  tokenRateLimiting:
+    mode: Reservation

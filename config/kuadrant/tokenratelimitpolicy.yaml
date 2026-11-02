@@ -1,0 +1,78 @@
+---
+# K-TRLP arm, part 2/2: token-denominated rate limiting on the Istio gateway's
+# HTTPRoute (llm-route), tiered by the JWT `tier` claim.
+#
+# Kuadrant extracts `usage.total_tokens` from the (non-streaming) OpenAI response
+# and sends it to Limitador as the counter increment (hits_addend). Default mode
+# is Optimistic: the actual token count is committed after the upstream responds,
+# so the (N+1)th request is denied once the window's token budget is spent.
+#
+# Keyed per user (`counters: auth.identity.sub`) and gated by the tier claim
+# (`when`). enterprise matches no limit -> unmetered (M1 exemption via conditions,
+# mirroring P4). Requires the AuthPolicy (authpolicy.yaml) on the same route so
+# `auth.identity.*` is populated before this runs.
+#
+# Budgets are sized to the inference-sim echo backend (~4 total_tokens for the
+# test's fixed "hello there" prompt): gold 20 (~5 req), silver 8 (~2 req),
+# default 12 (~3 req) -- tweak with the real token count if the prompt changes.
+#
+# NOTE (#200 gap): these `when`/`counters` can key on claim/path, but NOT on the
+# request-body `model` -- Envoy cannot read the body at the wasm phase here
+# (CONNLINK-1608), so a model-keyed rule is the predicted 🟡.
+apiVersion: kuadrant.io/v1alpha1
+kind: TokenRateLimitPolicy
+metadata:
+  name: llm-tokens
+  namespace: llm
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: llm-route
+  # Reservation mode (Kuadrant CR spec.tokenRateLimiting.mode: Reservation):
+  # reservation.amount is the ESTIMATE reserved on request arrival (M3); after the
+  # upstream responds, the actual usage.total_tokens is committed and the
+  # over-reservation released (M2 reserve->reconcile). amount MUST be non-zero
+  # (0 short-circuits to Optimistic) and <= the limit (else the first request can
+  # never reserve). Here amount=10 is a deliberate over-estimate vs the ~4
+  # total_tokens the echo backend returns for the test prompt, so reservation
+  # headroom (not just actual usage) gates admission:
+  #   deny when (committed_so_far) + amount > limit, i.e. (N-1)*~4 + 10 > limit.
+  # Budgets chosen for gold ~5, silver ~2, default ~3 admitted then 429.
+  # NOTE: amount can be a CEL expression, but it CANNOT read the request body's
+  # `max_tokens` (Envoy can't read the request body at the wasm phase here,
+  # CONNLINK-1608), so the estimate is a fixed/claim-derived value -> M3 is a
+  # static estimate, not a per-request body-derived one (the predicted 🟡).
+  limits:
+    gold:
+      rates:
+        - limit: 22
+          window: 60s
+      when:
+        - predicate: 'auth.identity.tier == "gold"'
+      counters:
+        - expression: auth.identity.sub
+      reservation:
+        amount: 10
+    silver:
+      rates:
+        - limit: 14
+          window: 60s
+      when:
+        - predicate: 'auth.identity.tier == "silver"'
+      counters:
+        - expression: auth.identity.sub
+      reservation:
+        amount: 10
+    # Default/catch-all for any other authenticated tier (e.g. `basic`); excludes
+    # enterprise so enterprise stays unmetered.
+    default:
+      rates:
+        - limit: 18
+          window: 60s
+      when:
+        - predicate: 'auth.identity.tier != "gold" && auth.identity.tier != "silver" && auth.identity.tier != "enterprise"'
+      counters:
+        - expression: auth.identity.sub
+      reservation:
+        amount: 10

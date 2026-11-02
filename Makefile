@@ -1,7 +1,7 @@
 SHELL := /usr/bin/env bash
 SCRIPTS := ./scripts
 
-.PHONY: help setup cluster deps kuadrant upstream jwt-issuer limitador istio-gateway praxis-image praxis-image-p3 praxis-image-p4 praxis praxis-p1 praxis-p2 praxis-p3 praxis-p4 test cleanup
+.PHONY: help setup cluster deps kuadrant upstream jwt-issuer limitador istio-gateway praxis-image praxis-image-p3 praxis-image-p4 praxis praxis-p1 praxis-p2 praxis-p3 praxis-p4 kuadrant-policies test cleanup
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -53,6 +53,9 @@ praxis-image-p4: ## Build the P4 image (praxis-ai:ratelimit, experimental-rateli
 
 praxis-p4: ## Deploy offering P4 (ratelimit/limitador) -> ns praxis-p4, port 8084
 	$(SCRIPTS)/06-deploy-praxis-p4.sh
+
+kuadrant-policies: ## Deploy the K-TRLP arm (AuthPolicy + TokenRateLimitPolicy) on the Istio gateway
+	$(SCRIPTS)/07-deploy-kuadrant-policies.sh
 
 test: ## Run the token rate limit test (needs port-forward praxis)
 	./test/test-token-rate-limit.sh

@@ -116,14 +116,57 @@ praxis-proxy/policy#178 is **merged**, so the build sources it from policy `main
     `200×6` (exempt), notier `400` (missing `tier` claim → `ratelimit.missing_attribute`, denies
     **before** counting), unauthenticated → `401`. **M5 independence confirmed** — per-tier counters
     are separate (each tier trips its own distinct limit).
-- Scores vs #200: **M1 ✅**, **M5 ✅** (request-count budgets + per-tier keys), **M6 🟡** (over-budget
-  is **429** — better than P3's 403 — but the minimal host wiring maps only the status, no
-  `X-RateLimit-*`/`Retry-After`; full #1478 would add them), **M7 🟡** (`tracing` only, no metrics),
-  **M2/M3/M4 N/A** (request-count around identity, pre-body → no tokens, no body-`model`).
+- Scores vs #200: **M1 🟡** (limits by **claim/`tier`** + path, enterprise-exempt + default — but
+  `ratelimit.post_identity` is **pre-body**, so it **cannot key on the request-body `model`**; model
+  is a valid M1 dimension, so partial), **M5 🟡** (multiple per-tier request budgets + per-tier keys,
+  but **no model-keyed budgets** for the same reason), **M6 🟡** (over-budget is **429** — better than
+  P3's 403 — but the minimal host wiring maps only the status, no `X-RateLimit-*`/`Retry-After`; full
+  #1478 would add them), **M7 🟡** (`tracing` only, no metrics), **M2/M3/M4 N/A** (request-count around
+  identity, pre-body → no tokens, no body-`model`).
+
+### K-TRLP — Kuadrant `TokenRateLimitPolicy` (token, Istio gateway) — LIVE, ENFORCES (per-tier)
+
+Config: `config/kuadrant/{authpolicy,tokenratelimitpolicy}.yaml` + the Kuadrant CR
+(`config/kuadrant/kuadrant-cr.yaml`, **`spec.tokenRateLimiting.mode: Reservation`**). Deployed by
+`scripts/07-deploy-kuadrant-policies.sh` onto the shared Istio gateway's HTTPRoute (`llm-route`).
+Kuadrant 1.6.0: `TokenRateLimitPolicy` is `kuadrant.io/v1alpha1`, `AuthPolicy` is `kuadrant.io/v1`.
+- **Auth ✅ (reuses the same tokens):** `AuthPolicy` verifies the RS256 JWT via **`jwksUrl`** —
+  Authorino's direct-JWKS mode, **no OIDC discovery** — so the static issuer pod and the existing
+  per-tier tokens work unchanged (no `iss`/discovery doc needed). No token → **401**.
+- **Reserve → reconcile (M2) ✅ — this is the point of K-TRLP.** In **Reservation** mode each limit
+  reserves an **estimate** (`reservation.amount`, non-zero — 0 short-circuits to Optimistic) on
+  request arrival, then commits the **actual** `usage.total_tokens` extracted from the (non-streaming)
+  response and **releases the over-reservation**. Per-tier budgets keyed per user
+  (`counters: auth.identity.sub`), gated by the claim (`when: auth.identity.tier == ...`). Playground
+  values: `reservation.amount: 10` (a deliberate over-estimate vs the echo backend's ~4
+  `total_tokens`/req), budgets gold 22 / silver 14 / default 18 tok/60s. Live:
+  gold `200×4→429`, silver `200×2→429`, basic `200×3→429`, enterprise `200×6` (no limit matches →
+  unmetered, M1 exemption via conditions), notier metered under the default bucket, no-token `401`.
+  That gold admits **4** (not `22/10 ≈ 2`) is the proof the reconcile releases the over-reservation —
+  committed usage (~4/req), not the reserved 10, accrues.
+- **M3 estimation 🟡 — static, not body-derived.** `reservation.amount` can be a literal or a CEL
+  expression, but it **cannot read the request body's `max_tokens`** (Envoy can't read the request
+  body at the wasm phase here — CONNLINK-1608), so the estimate is a fixed / claim-derived value, not
+  a per-request body estimate (contrast P2, which reads body `max_tokens` natively).
+- **Three config lessons (all fixed in-repo, see gotchas):** (1) Reservation needs a non-zero
+  `reservation.amount`. (2) Authorino does **not** surface JWT claims to the rate-limit wasm unless
+  exported via `AuthPolicy.response.success.filters` → each property becomes `auth.identity.<name>`;
+  without it the `auth.identity.tier` predicate raises a wasm `NoSuchKey` EvaluationError ("Failed to
+  apply predicates") → fail-open. (3) A token with **no `tier` claim** (`notier`) also NoSuchKey's
+  unless the filter supplies a fallback — `tier: {expression: 'has(auth.identity.tier) ?
+  string(auth.identity.tier) : "none"'}` routes it into the default bucket. *(An earlier detour used
+  Optimistic mode as a workaround; it was a mis-diagnosis of lesson (2)/(3), not a real Reservation
+  limitation — Reservation works once claims + fallback + amount are set.)*
+- Scores vs #200: **M1 🟡** (limits by **claim/`tier`** + path, enterprise-exempt + default — but
+  **cannot key on the request-body `model`**: CONNLINK-1608, body unreadable at the wasm phase; model
+  is a valid M1 dimension, so partial), **M2 ✅** (reserve→reconcile, demonstrated), **M3 🟡** (static
+  estimate, no body `max_tokens`), **M5 🟡** (multiple per-tier token budgets + per-user keys, but
+  **no model-keyed budgets** for the same reason), **M6 🟡** (over-budget is **429** but **no**
+  `X-RateLimit-*`/`Retry-After` headers by default), **M7** Kuadrant/Limitador metrics + Istio
+  telemetry (not re-scraped here). *(K-RLP dropped by decision.)*
 
 ### Not yet exercised
 
-- **K-TRLP** (Kuadrant `TokenRateLimitPolicy` on the Istio gateway). *(K-RLP dropped by decision.)*
 - Open: verified-JWT-claim → `x-tier` wiring on P2 (currently a client header).
 
 ## How it's built
@@ -261,6 +304,20 @@ Verified working: 8×`200` (each with real `usage.total_tokens`) then `429`.
   the request (so a token with no `tier` claim is denied, not defaulted). Over-budget denial is
   **429** (vs the `quota/limitador` 403). No standalone Limitador pod; counters are per-replica and
   reset on restart.
+- **K-TRLP enforcement silently fails open unless three things are set** (symptom: all `200`, no
+  `429`, `wasm log kuadrant-wasm-shim … Failed to apply predicates` in the gateway `istio-proxy`
+  logs). (1) **Reservation mode needs a non-zero `reservation.amount`** per limit — the default `0`
+  short-circuits to Optimistic (no reserve→reconcile, i.e. no M2/M3). (2) Authorino does **not**
+  expose JWT claims to the rate-limit wasm; add `AuthPolicy.rules.response.success.filters` with
+  `json.properties` so each becomes `auth.identity.<name>` for the TRLP `when`/`counters` — otherwise
+  `auth.identity.tier` is `NoSuchKey` and the predicate errors. (3) A token **missing the claim**
+  (`notier`) also errors unless the property has a fallback (`expression: 'has(auth.identity.tier) ?
+  string(auth.identity.tier) : "none"'`). Diagnose with the `istio-proxy` wasm log above; note
+  Limitador's committed `/counters/<ns>` stays `[]` under Reservation (reservations are tracked
+  separately), so an empty `/counters` is not by itself proof of non-enforcement — check the `429`s.
+- **Authorino can verify a JWT from a static JWKS without OIDC** via `jwt.jwksUrl` (no
+  `/.well-known/openid-configuration` needed), so the playground's static-JWKS issuer and the same
+  per-tier tokens work for the Kuadrant arm unchanged (no `iss`/discovery-doc gymnastics).
 - **502 with no Praxis error log = the upstream returned 502** (Praxis passes it through; not
   necessarily the private-IP dial guard). Enable `runtime.log_overrides` for
   `pingora_core`/`pingora_proxy` at `debug` to see the real upstream response.

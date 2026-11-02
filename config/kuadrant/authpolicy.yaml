@@ -1,0 +1,53 @@
+---
+# K-TRLP arm, part 1/2: authenticate LLM traffic with the playground's JWT.
+#
+# Targets the shared HTTPRoute (llm-route) on the Istio gateway. Authorino
+# verifies the RS256 JWT against the static JWKS **directly** (jwksUrl, no OIDC
+# discovery) -- so the same tokens minted for P3/P4 work unchanged. The decoded
+# JWT payload becomes `auth.identity.*` (so `auth.identity.tier` / `auth.identity.sub`
+# are available to the TokenRateLimitPolicy's predicates and counters).
+#
+# Authentication-only: a request with no/invalid token is rejected 401; a valid
+# token passes through to the rate-limit + upstream.
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: llm-jwt
+  namespace: llm
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: llm-route
+  rules:
+    authentication:
+      jwt-issuer:
+        jwt:
+          # Direct JWKS (Authorino supports jwksUrl without OIDC discovery); the
+          # static issuer pod only serves /.well-known/jwks.json.
+          jwksUrl: http://jwt-issuer.llm.svc.cluster.local:8080/.well-known/jwks.json
+        credentials:
+          authorizationHeader:
+            prefix: Bearer
+    response:
+      success:
+        # Export the JWT claims as "filters" data so the TokenRateLimitPolicy can
+        # read them. Authorino resolves the identity but does NOT surface its
+        # claims to the rate-limit wasm unless exported here; without this the
+        # TRLP predicates on `auth.identity.tier` raise a wasm EvaluationError
+        # ("Failed to apply predicates") and fail open (no counting). Each
+        # property becomes `auth.identity.<name>` for the TRLP.
+        filters:
+          identity:
+            json:
+              properties:
+                # Fall back to "none" when the token carries no `tier` claim
+                # (the `notier` test token). Without this, auth.identity.tier is
+                # absent and the TRLP predicate raises a wasm NoSuchKey error
+                # ("Failed to apply predicates") -> fail-open (notier unmetered).
+                # With the fallback, notier resolves tier="none" and falls into
+                # the default limit.
+                tier:
+                  expression: 'has(auth.identity.tier) ? string(auth.identity.tier) : "none"'
+                sub:
+                  selector: auth.identity.sub
